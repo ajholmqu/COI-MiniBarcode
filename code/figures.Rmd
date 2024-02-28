@@ -1,0 +1,536 @@
+---
+title: "figures"
+author: "Holmquist"
+date: "2024-02-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir =  "/Users/aholmquist/Documents/GitHub/COI-MiniBarcode/")
+```
+
+** Run analysis code first to produce the necessary data** 
+
+```{r figure 3}
+otu_mount_summary <- 
+  df_sotu %>%
+  group_by(cluster) %>%
+  summarise(mountain = n_distinct(mountain),
+            asv_num = n_distinct(asv)) %>%
+  ungroup()
+
+colors <- c("#A9AD98", "#E4B58B", "#EC7F6B")
+haplo_box <- 
+  otu_mount_summary %>%
+  ggplot(aes(as.factor(mountain), asv_num)) +
+  geom_boxplot(aes(fill = as.factor(mountain)), alpha = 0.9) +
+  geom_jitter(aes(color = as.factor(mountain)), alpha = 0.5) +
+  xlab("Number of mountains on which sOTU was detected") +
+  ylab("Number of haplotypes") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = colors) +
+  scale_color_manual(values = colors)
+
+```
+
+```{r figure 4}
+# Box plots
+elev_order <- c("< 500m", "500 - 1000m", "1000 - 1500m", 
+               "1500 - 2000m", "2000m")
+
+box_elevband <- 
+  hill_info %>%
+  pivot_longer(c(q0, q1, q2), names_to = "q", values_to = "hill_value") %>%
+  ggplot(aes(x = elev_grouping_1, y = hill_value)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_jitter(aes(color = q, shape = q), size = 3, alpha = 0.8) +
+  #scale_fill_manual(values = elev_palette) +
+  theme_minimal() +
+  #theme(axis.text.x = element_text(angle = 90)) +
+  xlab("Elevation band") +
+  ylab("Hill values") +
+  scale_color_manual(values = c("#DEBE72", "#948FCE", "#C479B0"))
+
+```
+
+```{r figure 5?}
+elev_order <- c("< 500m", "500 - 1000m", "1000 - 1500m", 
+               "1500 - 2000m", ">2000m")
+nmds_df <- 
+  nmds_df %>%
+  left_join(site_data, by = "site") 
+
+nmds_df$elev_grouping_1 <- factor(nmds_df$elev_grouping_1, levels = elev_order)
+
+grp.a <- nmds_df[nmds_df$mountain_letter == "DK", ][chull(nmds_df[nmds_df$mountain_letter == "DK", c("MDS1", "MDS2")]), ]  # hull values for grp A
+grp.b <- nmds_df[nmds_df$mountain_letter == "TPP", ][chull(nmds_df[nmds_df$mountain_letter == "TPP", c("MDS1", "MDS2")]), ]  # hull values for grp A
+grp.c <- nmds_df[nmds_df$mountain_letter == "GOR", ][chull(nmds_df[nmds_df$mountain_letter == "GOR", c("MDS1", "MDS2")]), ]  # hull values for grp A
+hull.data <- rbind(grp.a, grp.b, grp.c)  #combine grps
+
+nmds_plot <- 
+  ggplot(data = nmds_df, aes(MDS1, MDS2, color = mountain, shape = elev_grouping_1)) +
+    geom_point(size = 3) +
+    geom_polygon(data = hull.data, aes(x = MDS1, y = MDS2,
+                                     fill = mountain, group = mountain), 
+               alpha = 0.3, color = "NA") +
+  scale_fill_manual(values = mountain_palette) + 
+  scale_color_manual(values = mountain_palette) +
+  labs(fill = "Mountain",
+       color = "Mountain",
+       shape = "Elevation band") +
+  theme_minimal()
+```
+
+```{r figure 6?}
+mat_sotu <- 
+  final_df_clustered %>%
+  filter(threshold == "sOTU") %>%
+  mutate(site_combo = 
+           paste0(mountain, " (", 
+                  elev_grouping_1,")")) %>%
+  group_by(site_combo, cluster) %>%
+  summarise(n = n_distinct(sample)) %>%
+  acast(site_combo ~ cluster, fill = 0)
+
+mat_97 <- 
+  final_df_clustered %>%
+  filter(threshold == "0.97") %>%
+  mutate(site_combo = 
+           paste0(mountain, " (", 
+                  elev_grouping_1,")")) %>%
+  group_by(site_combo, cluster) %>%
+  summarise(n = n_distinct(sample)) %>%
+  acast(site_combo ~ cluster, fill = 0)
+
+mat_95 <- 
+  final_df_clustered %>%
+  filter(threshold == "0.95") %>%
+   mutate(site_combo = 
+           paste0(mountain, " (", 
+                  elev_grouping_1,")")) %>%
+  group_by(site_combo, cluster) %>%
+  summarise(n = n_distinct(sample)) %>%
+  acast(site_combo ~ cluster, fill = 0)
+
+library("ggdendro")
+dend_sotu <- as.dendrogram(hclust(
+  vegdist(mat_sotu, method = "bray"), 
+            method = "average")) # UPGMA
+dend_97 <- hclust(vegdist(mat_97, method = "bray"), 
+            method = "average") # UPGMA
+dend_95 <- hclust(vegdist(mat_95, method = "bray"), 
+            method = "average") # UPGMA
+
+dend_data_sotu <- dendro_data(dend_sotu)
+dend_plot_sotu <- 
+  dend_data_sotu$segments %>%
+  mutate(new_end = ifelse(yend == 0, 0.3, yend)) %>%
+  ggplot() +
+  geom_segment(aes(x = x, y = y, 
+                   xend = xend, yend = new_end), linewidth = 0.3) +
+  coord_flip() +
+  geom_text(data = dend_data_sotu$labels, 
+            aes(x, y = 0.15, 
+                label = label), size = 2) +
+  ylim(0.05, 1) + 
+  theme_dendro()
+  
+dend_data_97 <- dendro_data(dend_97)
+dend_plot_97 <- 
+  dend_data_97$segments %>%
+  mutate(new_end = ifelse(yend == 0, 0.3, yend)) %>%
+  ggplot() +
+  geom_segment(aes(x = x, y = y, 
+                   xend = xend, yend = new_end), linewidth = 0.3) +
+  coord_flip() +
+  geom_text(data = dend_data_97$labels, 
+            aes(x, y = 0.15, 
+                label = label),
+            size = 2) +
+  ylim(0.05, 1) + 
+  theme_dendro()
+
+dend_data_95 <- dendro_data(dend_95)
+dend_plot_95 <- 
+  dend_data_95$segments %>%
+  mutate(new_end = ifelse(yend == 0, 0.3, yend)) %>%
+  ggplot() +
+  geom_segment(aes(x = x, y = y, 
+                   xend = xend, yend = new_end), linewidth = 0.3) +
+  coord_flip() +
+  geom_text(data = dend_data_95$labels, 
+            aes(x, y = 0.15, 
+                label = label),
+            size = 2) +
+  ylim(0.05, 0.9) + 
+  theme_dendro()
+
+dend_arranged <- 
+  ggarrange(dend_plot_sotu, dend_plot_97, dend_plot_95,
+          ncol = 3, nrow = 1)
+```
+
+Supplementary Figures:
+
+Venn diagrams
+```{r otu venns}
+library(VennDiagram)
+
+# sOTUs
+dk_sotu <-
+  final_df_clustered %>%
+  filter(mountain_letter == "DK") %>%
+  filter(threshold == "sOTU") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+tpp_sotu <-
+  final_df_clustered %>%
+  filter(mountain_letter == "TPP") %>%
+  filter(threshold == "sOTU") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+gor_sotu <-
+  final_df_clustered %>%
+  filter(mountain_letter == "GOR") %>%
+  filter(threshold == "sOTU") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+venn.diagram(list("Dako" = dk_sotu, 
+                  "Ilomata" = gor_sotu, 
+                  "Torompupu" = tpp_sotu), 
+             resolution = 900,
+             fontfamily = "sans",
+             cat.fontfamily = "sans",
+             fill = mountain_palette,
+             cex = 0.8,
+             cat.cex = 0.8,
+             "sotu_venn.png")
+
+# 97%
+dk_97 <-
+  final_df_clustered %>%
+  filter(mountain_letter == "DK") %>%
+  filter(threshold == "0.97") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+tpp_97 <-
+  final_df_clustered %>%
+  filter(mountain_letter == "TPP") %>%
+  filter(threshold == "0.97") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+gor_97 <-
+  final_df_clustered %>%
+  filter(mountain_letter == "GOR") %>%
+  filter(threshold == "0.97") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+venn.diagram(list("Dako" = dk_97, 
+                  "Ilomata" = gor_97, 
+                  "Torompupu" = tpp_97), 
+             resolution = 900,
+             fontfamily = "sans",
+             cat.fontfamily = "sans",
+             fill = mountain_palette,
+             cex = 0.8,
+             cat.cex = 0.8,
+             "97_venn.png")
+
+# 95%
+dk_95 <-
+  final_df_clustered %>%
+  filter(mountain_letter == "DK") %>%
+  filter(threshold == "0.95") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+tpp_95 <-
+  final_df_clustered %>%
+  filter(mountain_letter == "TPP") %>%
+  filter(threshold == "0.95") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+gor_95 <-
+  final_df_clustered %>%
+  filter(mountain_letter == "GOR") %>%
+  filter(threshold == "0.95") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+venn.diagram(list("Dako" = dk_95, 
+                  "Ilomata" = gor_95, 
+                  "Torompupu" = tpp_95),
+             resolution = 900, 
+             fill = mountain_palette,
+             fontfamily = "sans",
+             cat.fontfamily = "sans",
+             cex = 0.8,
+             cat.cex = 0.8,
+             "95_venn.png")
+
+
+venn <- venn.diagram(
+  x = list(tpp_otu, dk_otu, gor_otu),
+  category.names = c("Torompupu", "Dako", "Ilomata"),
+  filename = NULL,
+  output = TRUE)
+
+grid.draw(venn)
+
+```
+
+Hill numbers by mountain
+```{r}
+# Plot - Mountains
+q0 <- 
+  ggplot(hill, aes(mountain, q0)) +
+  geom_boxplot(aes(fill = mountain)) +
+  geom_jitter(alpha = 0.5) +
+  # scale_fill_manual(values = mountain_palette) +
+  xlab("Mountain") + 
+  ylab("Richness (q = 0)") +
+  labs(fill = "Mountain") +
+  theme_minimal() 
+
+q1 <- ggplot(hill, aes(mountain, q1)) +
+  geom_boxplot(aes(fill = mountain)) +
+  geom_jitter(alpha = 0.5) +
+  # scale_fill_manual(values = mountain_palette) +
+  xlab("Mountain") + 
+  ylab("Exponential of Shannon Entropy (q = 1)") +
+  labs(fill = "Mountain") +
+  theme_minimal()
+
+q2 <- ggplot(hill, aes(mountain, q2)) +
+  geom_boxplot(aes(fill = mountain)) +
+  geom_jitter(alpha = 0.5) +
+  # scale_fill_manual(values = mountain_palette) +
+  xlab("Mountain") + 
+  ylab("Inverse of Simpson Index (q = 2)") +
+  labs(fill = "Mountain") +
+  theme_minimal()
+
+hill_box <- ggarrange(q0, q1, q2, nrow = 1, common.legend = T)
+ggsave("hill_mountains.png", units = "in", 
+       width = 7, height = 4, dpi = 800)
+```
+
+Linear Models
+```{r}
+# Plot
+q0 <- 
+  ggplot(data = hill_info) +
+  geom_smooth(aes(x = elev, y = q0),
+              method = "glm", alpha = 0.5, color = "black", se = F) +
+  geom_point(aes(x = elev, y = q0), 
+             alpha = 0.7, color = "#0191B4") +
+  xlab("Elevation") +
+  ylab("Richness (q = 0)") +
+  ylim(0, 65) +
+  theme_minimal() 
+
+q1 <- ggplot(data = hill_info) +
+    geom_smooth(aes(x = elev, y = q1),
+              method = "glm", alpha = 0.5, color = "black", se = F) +
+  geom_point(aes(x = elev, y = q1), 
+             alpha = 0.7, color = "#0191B4") +
+  xlab("Elevation") +
+  ylab("Exponential of Shannon Entropy (q = 1)")+
+  ylim(5, 50) +
+  theme_minimal() 
+
+q2 <- ggplot(data = hill_info) +
+    geom_smooth(aes(x = elev, y = q2),
+              method = "glm", alpha = 0.5, color = "black", se = F) +
+  geom_point(aes(x = elev, y = q2), 
+             alpha = 0.7, color = "#0191B4") +
+  xlab("Elevation") +
+  ylab("Inverse of Simpson Index (q = 2)") +
+  ylim(5, 65) +
+  theme_minimal() 
+
+lm_elev_plot <- ggpubr::ggarrange(q0, q1, q2, nrow = 1)
+ggsave("hill_elevation_lm.png", units = "in", 
+       width = 8.5, height = 3.75, dpi = 800, bg = "white")
+```
+
+Linear table
+```{r}
+ Statistics table
+library(broom)
+library(purrr)
+library(knitr)
+library(kableExtra)
+
+hill_lm <- list(`q = 0` = lmq0, q1 = lmq1, q2 = lmq2)
+lm_summaries <- map(hill_lm, tidy)
+
+lm_df <- bind_rows(lm_summaries) %>%
+  filter(term != "(Intercept)") %>%
+  select(-term)
+
+models <- c("q = 0", "q = 1", "q = 2")
+rsqar <- c(summary(lmq0)$adj.r.squared,
+           summary(lmq1)$adj.r.squared,
+           summary(lmq2)$adj.r.squared)
+lm_df$model <- models
+lm_df$adjr <- rsqar
+lm_df <- lm_df %>%
+  select(model, estimate, statistic, p.value, adjr)
+
+library(kableExtra)
+table <- 
+  kable(lm_df, format = "html", 
+        caption = "Summary of Linear Models - Elevation",
+        col.names = c("Hill number", "Estimate", "Statistic",
+                      "P-value", "Adj. R-squared")) %>%
+  kable_classic(full_width = FALSE,
+                html_font = "Arial") %>%
+  column_spec(1, bold = TRUE)
+save_kable(table, file = "linear.pdf")
+```
+
+Phylogeny 
+```{r}
+viridis::plasma(27)
+cp <- colorspace::choose_palette()
+cp <- cp(27)
+t <- ggtree(tree, branch.length = "none", layout = "circular", size = 0.1) %<+% phylo_df +
+  geom_tippoint(aes(color = id), size = 2) +
+  scale_color_manual(values = viridis::plasma(27), na.value = "transparent") + 
+  theme(legend.position = "none")
+```
+
+Heatmap
+```{r  heat maps - mountain}
+custom_order <- c("Ilomata: < 500m", "Ilomata: 500 - 1000m", 
+                      "Ilomata: 1000 - 1500m",
+                      "Dako: < 500m", "Dako: 500 - 1000m", "Dako: 1000 - 1500m",
+                      "Dako: 1500 - 2000m", "Dako: >2000m",
+                      "Torompupu: 500 - 1000m", "Torompupu: 1000 - 1500m",
+                      "Torompupu: 1500 - 2000m", "Torompupu: >2000m")
+
+heatmap_info <- 
+  final_df_clustered %>%
+  mutate(mnt_elev = paste0(mountain,": ", elev_grouping_1)) %>%
+  group_by(mnt_elev) %>%
+  filter(row_number() == 1) %>%
+  ungroup() %>%
+  select(mnt_elev, site:elev_grouping_2) %>%
+  arrange(factor(mnt_elev, levels = custom_order))
+
+mountain_palette <- c("#BAAD8D", "#92D3DC", "#93D07D")
+mnt_rep <- c(rep("DK", 5), rep("ILO", 3), rep("TPP", 4))
+color_map <- as.numeric(factor(mnt_rep, levels = mountain_palette))
+
+# 97%
+cluster_97 <- 
+  final_df_clustered %>%
+  filter(threshold == "0.97") %>%
+  mutate(mnt_elev = paste0(mountain,": ", elev_grouping_1)) %>%
+  distinct(mnt_elev, cluster)
+
+mnt_elev <- unique(cluster_97$mnt_elev)
+num <- length(mnt_elev)
+shared_mat <- matrix(0, nrow = num, ncol = num,
+                 dimnames = list(mnt_elev, mnt_elev))
+
+for (i in 1:(num - 1)){
+  for (j in (i + 1):num){
+    x1 <- mnt_elev[i]
+    x2 <- mnt_elev[j]
+    shared <- sum(cluster_97$cluster[cluster_97$mnt_elev == x1] %in% 
+                    cluster_97$cluster[cluster_97$mnt_elev == x2])
+    shared_mat[x1, x2] <- shared
+    shared_mat[x2, x1] <- shared
+  }
+}
+
+shared_97 <- shared_mat[custom_order, custom_order]
+
+get_upper_tri <- 
+  function(cormat){
+    cormat[lower.tri(cormat)]<- NA
+    return(cormat)
+  }
+
+get_lower_tri <- 
+  function(cormat){
+    cormat[upper.tri(cormat)]<- NA
+    return(cormat)
+}
+
+upper_tri <- get_upper_tri(shared_97)
+
+melted_cormat_97 <- 
+  melt(upper_tri, na.rm = TRUE) 
+
+corr_97 <- 
+  ggplot(data = melted_cormat_97, aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "white",
+           lwd = 0.6,
+           linetype = 1) +
+  scale_fill_gradient2(low = "#ff9c00", mid = "#dbb6b9", high = "#8163b3", na.value = "white",
+                      midpoint = 20) +
+  geom_text(aes(label = value), color = "black", size = 4) +
+  theme_transparent() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, 
+    size = 10, hjust = 1), 
+    axis.text.y = element_text(vjust = 1, size = 10, hjust = 1)) +
+  coord_fixed()
+
+# 95%
+cluster_95 <- 
+  final_df_clustered %>%
+  filter(threshold == "0.95") %>%
+  mutate(mnt_elev = paste0(mountain,": ", elev_grouping_1)) %>%
+  distinct(mnt_elev, cluster)
+
+mnt_elev <- unique(cluster_95$mnt_elev)
+num <- length(mnt_elev)
+shared_mat <- matrix(0, nrow = num, ncol = num,
+                 dimnames = list(mnt_elev, mnt_elev))
+
+for (i in 1:(num - 1)){
+  for (j in (i + 1):num){
+    x1 <- mnt_elev[i]
+    x2 <- mnt_elev[j]
+    shared <- sum(cluster_95$cluster[cluster_95$mnt_elev == x1] %in% 
+                    cluster_95$cluster[cluster_95$mnt_elev == x2])
+    shared_mat[x1, x2] <- shared
+    shared_mat[x2, x1] <- shared
+  }
+}
+
+shared_95 <- shared_mat[custom_order, custom_order]
+
+lower_tri <- get_lower_tri(shared_95)
+
+melted_cormat_95 <- 
+  melt(lower_tri, na.rm = TRUE) 
+
+corr_95 <- 
+  ggplot(data = melted_cormat_95, aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "white",
+           lwd = 0.6,
+           linetype = 1) +
+  scale_fill_gradient2(low = "#ff9c00", mid = "#dbb6b9", high = "#8163b3", na.value = "white",
+                      midpoint = 20) +
+  geom_text(aes(label = value), color = "black", size = 4) +
+  theme_transparent() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, 
+    size = 10, hjust = 1), 
+    axis.text.y = element_text(vjust = 1, size = 10, hjust = 1)) +
+  coord_fixed()
+
+
+```

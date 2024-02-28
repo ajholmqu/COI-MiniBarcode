@@ -1,0 +1,1495 @@
+---
+title: "Chapter 1"
+author: "Anna J Holmquist"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir =  "/Users/aholmquist/Documents/GitHub/sulawesi/spiders")
+
+```
+
+```{r libraries, echo = F}
+library(tidyverse)
+library(reshape2)
+library(ggpubr)
+library(kmer)
+library(ape)
+library(vegan)
+library(rstatix)
+library(VennDiagram)
+library(ggtree)
+library(treeio)
+library(BAT)
+library(Biostrings)
+library(pegas)
+library(ComplexHeatmap)
+library(stargazer)
+```
+
+```{r csv}
+lco_total <- read_csv("/Users/aholmquist/Documents/GitHub/sulawesi/spiders/data/lco_df.csv")
+# Modified lco_df - no pseudo or schiz or AJH samples; not filtered for multiple ASVs
+
+otu_id <- read_csv("/Users/aholmquist/Documents/GitHub/sulawesi/spiders/data/lco_otu_id.csv") #%>%
+  #select(-asv)
+# OTUs were identified to family using a phylogeny when possible (placements were occasionally ambiguous and these were left unidentified)
+
+morpho <- read.csv("/Users/aholmquist/Documents/GitHub/sulawesi/spiders/data/morpho.csv")
+# Morphological identifications of specimens
+
+site_data <- read.csv("/Users/aholmquist/Documents/GitHub/sulawesi/spiders/data/site_metadata.csv")
+final_df <- read.csv("/Users/aholmquist/Documents/GitHub/sulawesi/spiders/data/df_final.csv")
+final_df_clustered <- read.csv("/Users/aholmquist/Documents/GitHub/sulawesi/spiders/data/final_df_clustered.csv")
+
+```
+
+Sequencing Results
+```{r}
+lco_total %>%
+  group_by(sample) %>%
+  filter(n_distinct(asv) > 1)
+
+# Number of adults, and total spiders
+num_adults <- 
+  lco_total %>%
+  filter(!grepl("juv", sample)) %>%
+  summarise(n_distinct(sample)) %>%
+  pull()
+
+print(paste0("Number of adults: ", num_adults))
+print(paste0("Number of total spiders: ", num_adults+1444))
+
+# Number of ASVs, OTUs in total
+lco_total %>%
+  summarise(asv = n_distinct(asv),
+            otu = n_distinct(otu)) 
+
+# Number of OTUs per juvenile pool
+lco_total %>%
+  filter(grepl("juv", sample)) %>%
+  group_by(sample) %>%
+  summarise(otu = n_distinct(otu)) %>%
+  ungroup() %>%
+  summarise(mean(otu),
+            median(otu))
+
+# Number of OTUs per adult 
+lco_total %>%
+  filter(!grepl("juv", sample)) %>%
+  group_by(sample) %>%
+  summarise(otu = n_distinct(otu)) %>%
+  ungroup() %>%
+  summarise(mean(otu),
+            median(otu))
+
+# Number of unique OTUs in juveniles 
+juv_otu <-
+  lco_total %>%
+  filter(grepl("juv", sample)) %>%
+  distinct(otu) %>%
+  pull()
+
+adult_otu <-
+  lco_total %>%
+  filter(!grepl("juv", sample)) %>%
+  distinct(otu) %>%
+  pull()
+
+print(paste0("Number of OTUs found only in juvenile pools: ", 
+             length(juv_otu[!juv_otu %in% adult_otu])))
+print(paste0("Number of OTUs found only in adult pools: ", 
+             length(adult_otu[!adult_otu %in% juv_otu])))
+```
+
+Determining filtering thresholds and removing multiple OTUs found in adult samples
+````{r}
+# Supplementary figure: number of OTUs per individual
+otu_hist <- 
+  lco_total %>%
+  filter(!grepl("juv", sample)) %>%
+  group_by(sample) %>%
+  summarise(n = n_distinct(otu)) %>%
+  ggplot(aes(n)) +
+  geom_histogram() +
+  xlab("Number of OTUs") +
+  ylab("Number of samples") +
+  theme_minimal()
+ggsave("figures/supp/supp_numberofotus.png", height = 3, width = 5, units = "in")
+# Creating dataset with identified adult specimens
+morpho_adults_all <-
+  lco_total %>%
+  # Remove juveniles
+  filter(!grepl("juv", sample)) %>%
+  # Join the morphological data with the OTU identity data
+  left_join(morpho, by = c("morpho_label" = "sample")) %>%
+  left_join(otu_id, by = c("otu", "otu_seq")) %>%
+  # Remove any that were not identified
+  filter(!is.na(morpho_family) & !is.na(id)) %>%
+  # Create column for identity matches
+  mutate(match = ifelse(morpho_family == id, "Match", "Mismatch")) 
+
+# Number of mismatches when selecting max count
+morpho_adults_all %>%
+  group_by(sample) %>%
+  slice_max(otu_count) %>%
+  ungroup() %>%
+  group_by(match) %>%
+  summarise(n_distinct(sample)) %>%
+  ungroup()
+
+# Match/Mismatch colors
+p_fill <- c("#bfcbdb","#b04238")
+
+# Assess the importance of number of reads
+p_reads_hist <- 
+  morpho_adults_all %>%
+  ggplot(aes(x = otu_count)) +
+  geom_histogram(aes(fill = as.factor(match)), 
+                 color = "black", position = "dodge") +
+  labs(x = "sOTU reads", y = "Count", fill = "Taxonomic Match") +
+  scale_fill_manual(values = p_fill) +
+  theme_minimal()
+
+p_reads_box <- 
+  morpho_adults_all %>%
+  ggplot(aes(x = as.factor(match), y = log(otu_count))) +
+  geom_boxplot(aes(fill = as.factor(match))) +
+  geom_jitter(alpha = 0.1) +
+  labs(x = "Taxonomic Match", y = "Log-transformed sOTU count", fill = "Taxonomic Match") + 
+  scale_fill_manual(values = p_fill) +
+  theme_minimal()
+
+p_reads <- ggarrange(p_reads_hist, p_reads_box, common.legend = TRUE)
+
+t.test(morpho_adults_all$otu_count[morpho_adults_all$match == "Match"], 
+       morpho_adults_all$otu_count[morpho_adults_all$match == "Mismatch"])
+
+morpho_adults_all %>%
+  group_by(match) %>%
+  summarise(iqr = IQR(otu_count),
+            median = median(otu_count),
+            mean = mean(otu_count),
+            min = min(otu_count),
+            lower = quantile(otu_count, 0.25),
+            upper = quantile(otu_count, 0.75))
+
+# Assess the importance of OTU proportion
+otu_proportion <- 
+  morpho_adults_all %>%
+  mutate(prop = otu_count / otu_size) 
+
+p_otuprop_hist <- 
+  otu_proportion %>%
+  ggplot(aes(x = prop)) +
+  geom_histogram(aes(fill = as.factor(match)), 
+                 color = "black", position = "dodge") +
+  labs(x = "sOTU reads", y = "Count", fill = "Taxonomic Match") +
+  scale_fill_manual(values = p_fill) +
+  theme_minimal()
+
+p_otuprop_box <- 
+  otu_proportion %>%
+  ggplot(aes(x = match, y = log(prop))) +
+  geom_boxplot(aes(fill = as.factor(match))) +
+  geom_jitter(alpha = 0.1) +
+  labs(x = "Taxonomic Match", y = "Log-transformed proportion", fill = "Taxonomic Match") +
+  scale_fill_manual(values = p_fill) +
+  theme_minimal()
+
+p_otuprop <- ggarrange(p_otuprop_hist, p_otuprop_box, common.legend = TRUE)
+t.test(otu_proportion$prop[otu_proportion$match == "Match"], 
+       otu_proportion$prop[otu_proportion$match == "Mismatch"])
+
+otu_proportion %>%
+  group_by(match) %>%
+  summarise(iqr = IQR(prop),
+            median = median(prop),
+            mean = mean(prop),
+            min = min(prop),
+            lower = quantile(prop, 0.25),
+            upper = quantile(prop, 0.75))
+
+# Apply filters to total dataset and assess changes in multiple OTUs
+lco_total %>%
+  filter(otu_count / otu_size > 0.005 &
+           otu_count > 25) %>%
+  filter(!grepl("juv", sample)) %>%
+  group_by(sample) %>%
+  summarise(n = n_distinct(otu)) %>%
+  ungroup() %>%
+  summarise(mean(n),
+            median(n)) 
+
+# Create final data frame based on above results
+final_adults <- 
+  lco_total %>%
+  filter(otu_count / otu_size > 0.005 &
+           otu_count > 25) %>%
+  filter(!grepl("juv", sample)) %>%
+  group_by(sample) %>%
+  slice(which.max(count)) %>%
+  ungroup()
+n_distinct(final_adults$sample)
+
+final_df <- 
+  lco_total %>%
+  filter(grepl("juv", sample)) %>%
+  rbind(final_adults) %>%
+  left_join(otu_id, by = c("otu", "otu_seq")) 
+
+```
+
+Add site information
+```{r}
+for(i in 1:length(final_df$sample)){
+  for(site in site_data$site){
+    if(grepl(site, final_df$sample[i])){
+      final_df$site[i] <- site
+      break
+    }
+  }
+}
+
+final_df <- final_df %>%
+  left_join(site_data, by = "site")
+
+# Write CSV for future analysis
+write.csv(final_df,
+          "/Users/aholmquist/Documents/GitHub/sulawesi/spiders/data/df_final.csv",
+          row.names = F)
+
+```
+
+Create kmer OTUs
+```{r}
+library(Biostrings)
+library(ape)
+library(kmer)
+
+# Make sequences into DNAbin
+seqs <- 
+  final_df %>%
+  select(asv, seq) %>%
+  group_by(asv, seq) %>%
+  filter(row_number() == 1) %>%
+  ungroup() 
+
+seqs_fasta <- DNAStringSet(seqs$seq)
+write.FASTA(seqs_fasta, "spider_sotus.fast")
+seqs_fasta <- as.DNAbin(seqs_fasta)
+names(seqs_fasta) <- seqs$asv
+
+# Create different clusters
+set.seed(345)
+cluster_97 <- otu(seqs_fasta, method = "centroid", 
+                  threshold = 0.97, k = 3) 
+cluster_95 <- otu(seqs_fasta, method = "centroid", 
+                  threshold = 0.95, k = 3) 
+
+# Numbers
+length(unique(final_df$asv))
+length(unique(final_df$otu)) # 508
+length(unique(cluster_97)) # 332
+length(unique(cluster_95)) # 145
+
+# Add to data frame
+df_97 <- 
+  as.data.frame(cluster_97) %>%
+  rownames_to_column(var = "asv") %>%
+  mutate(centroid = ifelse(grepl("\\*", asv), TRUE, FALSE),
+         cluster = paste0("cluster97_", cluster_97),
+         threshold = 0.97,
+         asv = sub("\\*", "", asv)) %>%
+  group_by(cluster) %>%
+  mutate(parent = asv[centroid == TRUE]) %>%
+  ungroup() %>%
+  select(-cluster_97)
+
+df_95 <- 
+  as.data.frame(cluster_95) %>%
+  rownames_to_column(var = "asv") %>%
+  mutate(centroid = ifelse(grepl("\\*", asv), TRUE, FALSE),
+         cluster = paste0("cluster95_", cluster_95),
+         threshold = 0.95,
+         asv = sub("\\*", "", asv)) %>%
+  group_by(cluster) %>%
+  mutate(parent = asv[centroid == TRUE]) %>%
+  ungroup() %>%
+  select(-cluster_95)
+
+# Create total dataframe
+asv <- 
+  final_df %>%
+  group_by(asv, seq) %>%
+  filter(row_number() == 1) %>%
+  select(asv, seq)
+
+df_clusters <- 
+  rbind(df_97, df_95) %>%
+  left_join(asv, by = c("parent" = "asv")) %>%
+  select(-parent, -centroid) %>%
+  rename(cluster_seq = seq)
+
+otu <- 
+  final_df %>%
+  select(asv, otu, otu_seq) %>%
+  mutate(threshold = "sOTU") %>%
+  rename(cluster = otu,
+         cluster_seq = otu_seq) %>%
+  group_by(asv) %>%
+  filter(row_number() == 1) %>%
+  ungroup()
+
+df_clusters <- rbind(df_clusters, otu)
+
+final_df_clustered <-
+  final_df %>%
+  select(-c(otu, otu_count, otu_size, otu_seq)) %>%
+  left_join(df_clusters, by = "asv") %>%
+  # Based on phylogeny, and the enormity of this asv, seems incorrect
+  filter(asv != "asv_lco_1")
+
+# How big was asv_lco_1
+final_df %>%
+  filter(asv == "asv_lco_1") 
+  summarise(n_distinct(sample))
+
+final_df_sotu <- final_df_clustered %>%
+  filter(threshold == "sOTU") 
+
+write.csv(final_df_clustered, "final_df_clustered.csv", row.names = F)
+
+# Create table showing 
+
+clustering_tab <- 
+  final_df_clustered %>% 
+  group_by(mountain, threshold) %>% 
+  summarise(n = n_distinct(cluster)) %>%
+  ungroup() %>%
+  pivot_wider(names_from = threshold, values_from = n)
+
+clustering_tab <- 
+  final_df_clustered %>% 
+  group_by(threshold) %>% 
+  summarise(n = n_distinct(cluster)) %>%
+  ungroup() %>%
+  mutate(mountain = "All") %>%
+  pivot_wider(names_from = threshold, values_from = n) %>%
+  rbind(clustering_tab) %>%
+  arrange(desc(mountain))
+
+otu_num_table <- 
+  kable(clustering_tab, format = "html", 
+        caption = "Number of clusters",
+        col.names = c("Mountain", "95%", "97%", "sOTU")) %>%
+  kable_classic(
+                html_font = "Arial") %>%
+  column_spec(1, bold = TRUE)
+save_kable(otu_num_table, file = "otu_nums.pdf")
+
+```
+
+Biodiversity summary
+```{r summary}
+final_df_sotu %>%
+  summarise(n_distinct(cluster),
+            n_distinct(asv))
+  
+final_df %>%
+  group_by(otu) %>%
+  filter(row_number() == 1) %>%
+  ungroup() %>%
+  filter(percent >= 95) %>%
+  summarise(n_distinct(otu))
+
+final_df %>%
+  filter(percent > 99) %>%
+  summarise(n_distinct(otu))
+
+final_df %>%
+  filter(percent > 99) %>%
+  group_by(genus, species) %>%
+  summarise(n_distinct(otu))
+
+final_df %>%
+  summarise(n_distinct(id))
+
+final_df %>%
+  group_by(otu) %>%
+  filter(n_distinct(asv) > 1) %>%
+  ungroup() %>%
+  summarise(n_distinct(otu))
+
+final_df %>%
+  group_by(otu) %>%
+  summarise(n = n_distinct(asv)) %>%
+  ungroup() %>%
+  group_by(n) %>%
+  summarise(n_distinct(otu))
+
+final_df %>%
+  filter(!is.na(id)) %>%
+  group_by(id) %>%
+  summarise(n_distinct(sample))
+```
+
+Test haplotypes across mountains
+```{r statistical test for haplotypes}
+otu_mount_summary <- 
+  final_df %>%
+  group_by(otu) %>%
+  summarise(mountain = n_distinct(mountain),
+            asv_num = n_distinct(asv)) %>%
+  ungroup()
+ 
+contingency_table <- table(otu_mount_summary$asv_num, otu_mount_summary$mountain)
+chisq.test(contingency_table)
+
+colors <- c("#A9AD98", "#E4B58B", "#EC7F6B")
+haplo_box <- 
+  otu_mount_summary %>%
+  ggplot(aes(as.factor(mountain), asv_num)) +
+  geom_boxplot(aes(fill = as.factor(mountain)), alpha = 0.9) +
+  geom_jitter(aes(color = as.factor(mountain)), alpha = 0.5) +
+  xlab("Number of mountains on which sOTU was detected") +
+  ylab("Number of haplotypes") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = colors) +
+  scale_color_manual(values = colors)
+
+otu_mount_summary %>%
+  group_by(mountain) %>%
+  summarise(mean(asv_num))
+
+```
+
+Create venn diagrams
+```{r otu venns}
+library(VennDiagram)
+
+# sOTUs
+dk_sotu <-
+  final_df_clustered %>%
+  filter(mountain_letter == "DK") %>%
+  filter(threshold == "sOTU") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+tpp_sotu <-
+  final_df_clustered %>%
+  filter(mountain_letter == "TPP") %>%
+  filter(threshold == "sOTU") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+gor_sotu <-
+  final_df_clustered %>%
+  filter(mountain_letter == "GOR") %>%
+  filter(threshold == "sOTU") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+venn.diagram(list("Dako" = dk_sotu, 
+                  "Ilomata" = gor_sotu, 
+                  "Torompupu" = tpp_sotu), 
+             resolution = 900,
+             fontfamily = "sans",
+             cat.fontfamily = "sans",
+             fill = mountain_palette,
+             cex = 0.8,
+             cat.cex = 0.8,
+             "sotu_venn.png")
+
+# 97%
+dk_97 <-
+  final_df_clustered %>%
+  filter(mountain_letter == "DK") %>%
+  filter(threshold == "0.97") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+tpp_97 <-
+  final_df_clustered %>%
+  filter(mountain_letter == "TPP") %>%
+  filter(threshold == "0.97") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+gor_97 <-
+  final_df_clustered %>%
+  filter(mountain_letter == "GOR") %>%
+  filter(threshold == "0.97") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+venn.diagram(list("Dako" = dk_97, 
+                  "Ilomata" = gor_97, 
+                  "Torompupu" = tpp_97), 
+             resolution = 900,
+             fontfamily = "sans",
+             cat.fontfamily = "sans",
+             fill = mountain_palette,
+             cex = 0.8,
+             cat.cex = 0.8,
+             "97_venn.png")
+
+# 95%
+dk_95 <-
+  final_df_clustered %>%
+  filter(mountain_letter == "DK") %>%
+  filter(threshold == "0.95") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+tpp_95 <-
+  final_df_clustered %>%
+  filter(mountain_letter == "TPP") %>%
+  filter(threshold == "0.95") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+gor_95 <-
+  final_df_clustered %>%
+  filter(mountain_letter == "GOR") %>%
+  filter(threshold == "0.95") %>% 
+  distinct(cluster) %>% 
+  pull()
+
+venn.diagram(list("Dako" = dk_95, 
+                  "Ilomata" = gor_95, 
+                  "Torompupu" = tpp_95),
+             resolution = 900, 
+             fill = mountain_palette,
+             fontfamily = "sans",
+             cat.fontfamily = "sans",
+             cex = 0.8,
+             cat.cex = 0.8,
+             "95_venn.png")
+
+```
+
+Calculate hill values
+```{r hill numbers}
+community_matrix <- 
+  final_df_clustered %>%
+  filter(threshold =="sOTU") %>%
+  group_by(site, cluster) %>%
+  summarise(n = n_distinct(sample)) %>%
+  acast(site ~ cluster, fill = 0)
+
+# Hill numbers
+library(vegan)
+hill <- 
+  renyi(community_matrix, hill = TRUE, scales = c(0,1,2)) %>%
+  rownames_to_column(var = "site")
+colnames(hill) <- c("site", "q0", "q1", "q2")
+
+hill_info <- 
+  site_data %>%
+  right_join(hill, by = "site") %>%
+  group_by(site) %>%
+  filter(row_number() == 1) %>%
+  ungroup() 
+
+summary(hill)
+```
+
+```{r Hill by elevation}
+# Diversity by elevation group
+hill_summary <- 
+  hill_info %>%
+  group_by(elev_grouping_1,) %>%
+  summarise(mean_q0 = round(mean(q0), digits = 4),
+            mean_q1 = round(mean(q1), digits = 4),
+            mean_q2 = round(mean(q2),  digits = 4))
+
+# ANOVA
+aov_elev_q0 <- aov(q0 ~ elev_grouping_1, data = hill_info)
+aov_elev_q1 <- aov(q1 ~ elev_grouping_1, data = hill_info)
+aov_elev_q2 <- aov(q2 ~ elev_grouping_1, data = hill_info)
+
+TukeyHSD(aov_elev_q0)
+TukeyHSD(aov_elev_q1)
+TukeyHSD(aov_elev_q2)
+
+# Box plots
+elev_order <- c("< 500m", "500 - 1000m", "1000 - 1500m", 
+               "1500 - 2000m", "2000m")
+
+box_elevband <- 
+  hill_info %>%
+  pivot_longer(c(q0, q1, q2), names_to = "q", values_to = "hill_value") %>%
+  ggplot(aes(x = elev_grouping_1, y = hill_value)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_jitter(aes(color = q, shape = q), size = 3, alpha = 0.8) +
+  #scale_fill_manual(values = elev_palette) +
+  theme_minimal() +
+  #theme(axis.text.x = element_text(angle = 90)) +
+  xlab("Elevation band") +
+  ylab("Hill values") +
+  scale_color_manual(values = c("#DEBE72", "#948FCE", "#C479B0"))
+
+# Linear models across elevation
+lmq0 <- lm(q0 ~ elev, data = hill_info) # R2 = 0.076, p = 0.108
+lmq1 <- lm(q1 ~ elev, data = hill_info) # R2 = 0.223, p = 0.013
+lmq2 <- lm(q2 ~ elev, data = hill_info) # R2 = 0.322, p = 0.003
+
+# Plot
+q0 <- 
+  ggplot(data = hill_info) +
+  geom_smooth(aes(x = elev, y = q0),
+              method = "glm", alpha = 0.5, color = "black", se = F) +
+  geom_point(aes(x = elev, y = q0), 
+             alpha = 0.7, color = "#0191B4") +
+  xlab("Elevation") +
+  ylab("Richness (q = 0)") +
+  ylim(0, 65) +
+  theme_minimal() 
+
+q1 <- ggplot(data = hill_info) +
+    geom_smooth(aes(x = elev, y = q1),
+              method = "glm", alpha = 0.5, color = "black", se = F) +
+  geom_point(aes(x = elev, y = q1), 
+             alpha = 0.7, color = "#0191B4") +
+  xlab("Elevation") +
+  ylab("Exponential of Shannon Entropy (q = 1)")+
+  ylim(5, 50) +
+  theme_minimal() 
+
+q2 <- ggplot(data = hill_info) +
+    geom_smooth(aes(x = elev, y = q2),
+              method = "glm", alpha = 0.5, color = "black", se = F) +
+  geom_point(aes(x = elev, y = q2), 
+             alpha = 0.7, color = "#0191B4") +
+  xlab("Elevation") +
+  ylab("Inverse of Simpson Index (q = 2)") +
+  ylim(5, 65) +
+  theme_minimal() 
+
+lm_elev_plot <- ggpubr::ggarrange(q0, q1, q2, nrow = 1)
+ggsave("hill_elevation_lm.png", units = "in", 
+       width = 8.5, height = 3.75, dpi = 800, bg = "white")
+
+# Statistics table
+library(broom)
+library(purrr)
+library(knitr)
+library(kableExtra)
+
+hill_lm <- list(`q = 0` = lmq0, q1 = lmq1, q2 = lmq2)
+lm_summaries <- map(hill_lm, tidy)
+
+lm_df <- bind_rows(lm_summaries) %>%
+  filter(term != "(Intercept)") %>%
+  select(-term)
+
+models <- c("q = 0", "q = 1", "q = 2")
+rsqar <- c(summary(lmq0)$adj.r.squared,
+           summary(lmq1)$adj.r.squared,
+           summary(lmq2)$adj.r.squared)
+lm_df$model <- models
+lm_df$adjr <- rsqar
+lm_df <- lm_df %>%
+  select(model, estimate, statistic, p.value, adjr)
+
+library(kableExtra)
+table <- 
+  kable(lm_df, format = "html", 
+        caption = "Summary of Linear Models - Elevation",
+        col.names = c("Hill number", "Estimate", "Statistic",
+                      "P-value", "Adj. R-squared")) %>%
+  kable_classic(full_width = FALSE,
+                html_font = "Arial") %>%
+  column_spec(1, bold = TRUE)
+save_kable(table, file = "linear.pdf")
+getwd()
+```
+
+```{r Hill by mountain}
+# ANOVA - mountains
+aov_q0 <- aov(q0 ~ mountain, data = hill)
+summary(aov_q0)
+
+aov_q1 <- aov(q1 ~ mountain, data = hill)
+summary(aov_q1)
+
+aov_q2 <- aov(q2 ~ mountain, data = hill)
+summary(aov_q2)
+
+# Plot - Mountains
+q0 <- 
+  ggplot(hill, aes(mountain, q0)) +
+  geom_boxplot(aes(fill = mountain)) +
+  geom_jitter(alpha = 0.5) +
+  # scale_fill_manual(values = mountain_palette) +
+  xlab("Mountain") + 
+  ylab("Richness (q = 0)") +
+  labs(fill = "Mountain") +
+  theme_minimal() 
+
+q1 <- ggplot(hill, aes(mountain, q1)) +
+  geom_boxplot(aes(fill = mountain)) +
+  geom_jitter(alpha = 0.5) +
+  # scale_fill_manual(values = mountain_palette) +
+  xlab("Mountain") + 
+  ylab("Exponential of Shannon Entropy (q = 1)") +
+  labs(fill = "Mountain") +
+  theme_minimal()
+
+q2 <- ggplot(hill, aes(mountain, q2)) +
+  geom_boxplot(aes(fill = mountain)) +
+  geom_jitter(alpha = 0.5) +
+  # scale_fill_manual(values = mountain_palette) +
+  xlab("Mountain") + 
+  ylab("Inverse of Simpson Index (q = 2)") +
+  labs(fill = "Mountain") +
+  theme_minimal()
+
+hill_box <- ggarrange(q0, q1, q2, nrow = 1, common.legend = T)
+ggsave("hill_mountains.png", units = "in", 
+       width = 7, height = 4, dpi = 800)
+
+```
+
+```{r shared OTUs by mountain}
+shared_otu <- 
+  final_df_clustered %>%
+  filter(threshold == "sOTU") %>%
+  group_by(cluster) %>%
+  filter(n_distinct(mountain) == 3) %>%
+  distinct(cluster) %>%
+  pull(cluster)
+
+shared <- 
+  final_df_clustered %>%
+  filter(cluster %in% shared_otu)
+
+shared %>%
+  group_by(cluster, mountain, elev_grouping_1) %>%
+  summarise(n())
+
+tpp_otu <- final_df_clustered %>%
+  filter(threshold == "sOTU" & mountain_letter == "TPP") %>%
+  distinct(cluster) %>%
+  pull()
+
+dk_otu <- final_df_clustered %>%
+  filter(threshold == "sOTU" & mountain_letter == "DK") %>%
+  distinct(cluster) %>%
+  pull()
+
+gor_otu <- final_df_clustered %>%
+  filter(threshold == "sOTU" & mountain_letter == "GOR") %>%
+  distinct(cluster) %>%
+  pull()
+
+venn <- venn.diagram(
+  x = list(tpp_otu, dk_otu, gor_otu),
+  category.names = c("Torompupu", "Dako", "Ilomata"),
+  filename = NULL,
+  output = TRUE)
+
+grid.draw(venn)
+```
+
+```{r beta diversity by elevation}
+final_df_clustered %>%
+  filter(threshold == "sOTU") %>%
+  group_by(mountain, cluster) %>%
+  summarise(num_elev = n_distinct(elev_grouping_1)) %>%
+  filter(num_elev == 5) # otu_lco_1
+
+final_df_clustered %>%
+  filter(threshold == "sOTU") %>%
+  group_by(mountain, cluster) %>%
+  filter(mountain_letter == "TPP") %>%
+  summarise(num_elev = n_distinct(elev_grouping_1)) %>%
+  filter(num_elev == 4) %>%
+  pull(cluster) -> tpp_elev_otus
+  
+final_df_clustered %>%
+  filter(threshold == "sOTU") %>%
+  group_by(mountain, cluster) %>%
+  filter(mountain_letter == "GOR") %>%
+  summarise(num_elev = n_distinct(elev_grouping_1)) %>%
+  filter(num_elev == 3) %>%
+  pull(cluster) -> gor_elev_otus
+
+  final_df_clustered %>%
+    filter(cluster == "otu_lco_1") %>%
+    filter(!grepl("juv", sample)) %>%
+    left_join(morpho, by = "sample")
+
+```
+
+```{r phylogenetic beta diversity}
+getwd()
+# ASV community matrix
+asv_community_matrix <- 
+  final_df_clustered %>%
+  filter(threshold =="sOTU") %>%
+  group_by(site, asv) %>%
+  summarise(n = n_distinct(sample)) %>%
+  acast(site ~ asv, fill = 0)
+
+# Tree figure
+phylo_df <- 
+  final_df_clustered %>%
+  group_by(asv) %>%
+  filter(row_number() == 1) %>%
+  ungroup() %>%
+  select(asv, family, id)
+
+tree <- read.tree("/Users/aholmquist/Documents/GitHub/sulawesi/spiders/data/spider_sotus.fasta.treefile")
+tree <- drop.tip(tree, "asv_lco_1")
+viridis::plasma(27)
+cp <- colorspace::choose_palette()
+cp <- cp(27)
+t <- ggtree(tree, branch.length = "none", layout = "circular", size = 0.1) %<+% phylo_df +
+  geom_tippoint(aes(color = id), size = 2) +
+  scale_color_manual(values = viridis::plasma(27), na.value = "transparent") + 
+  theme(legend.position = "none")
+
+beta <- BAT::beta(comm = asv_community_matrix, tree = tree, raref = 20)
+beta_mat <- as.matrix(beta$Btotal.mean)
+rownames(beta_mat) <- rownames(asv_community_matrix)
+colnames(beta_mat) <- rownames(asv_community_matrix)
+beta_dist <- as.dist(beta_mat)
+
+set.seed(999)
+nmds <- metaMDS(beta_dist, k = 3, tidy = T)
+nmds_df <- as_data_frame(nmds$points)
+nmds_df$site <- rownames(nmds$points) 
+nmds$stress
+
+elev_order <- c("< 500m", "500 - 1000m", "1000 - 1500m", 
+               "1500 - 2000m", ">2000m")
+nmds_df <- 
+  nmds_df %>%
+  left_join(site_data, by = "site") 
+
+nmds_df$elev_grouping_1 <- factor(nmds_df$elev_grouping_1, levels = elev_order)
+
+grp.a <- nmds_df[nmds_df$mountain_letter == "DK", ][chull(nmds_df[nmds_df$mountain_letter == "DK", c("MDS1", "MDS2")]), ]  # hull values for grp A
+grp.b <- nmds_df[nmds_df$mountain_letter == "TPP", ][chull(nmds_df[nmds_df$mountain_letter == "TPP", c("MDS1", "MDS2")]), ]  # hull values for grp A
+grp.c <- nmds_df[nmds_df$mountain_letter == "GOR", ][chull(nmds_df[nmds_df$mountain_letter == "GOR", c("MDS1", "MDS2")]), ]  # hull values for grp A
+hull.data <- rbind(grp.a, grp.b, grp.c)  #combine grps
+
+nmds_plot <- 
+  ggplot(data = nmds_df, aes(MDS1, MDS2, color = mountain, shape = elev_grouping_1)) +
+    geom_point(size = 3) +
+    geom_polygon(data = hull.data, aes(x = MDS1, y = MDS2,
+                                     fill = mountain, group = mountain), 
+               alpha = 0.3, color = "NA") +
+  scale_fill_manual(values = mountain_palette) + 
+  scale_color_manual(values = mountain_palette) +
+  labs(fill = "Mountain",
+       color = "Mountain",
+       shape = "Elevation band") +
+  theme_minimal()
+
+# PERMANOVA
+beta_perm <- adonis2(beta_dist ~ mountain + elev + mountain*elev, data = site_data)  
+# PERMDISP
+beta_disp_mountain <- betadisper(beta_dist, site_data$mountain)
+beta_disp_elevation <- betadisper(beta_dist, site_data$elev_grouping_1)
+
+anova(beta_disp_mountain)
+anova(beta_disp_elevation)
+
+```
+
+Clustering data - Mountains
+```{r}
+# Number in total
+final_df_clustered %>%
+  group_by(threshold) %>%
+  summarise(n_distinct(cluster))
+
+# Number by mountain, plus add number of unique - 97%
+table_97_mnt <- 
+  final_df_clustered %>%
+  group_by(mountain, threshold) %>%
+  summarise(n = n_distinct(cluster)) %>%
+  ungroup() %>%
+  filter(threshold == 0.97)
+
+dk_97_unique <- dk_97[!dk_97 %in% tpp_97 & !dk_97 %in% gor_97]
+gor_97_unique <- gor_97[!gor_97 %in% dk_97 & !gor_97 %in% tpp_97]
+tpp_97_unique <- tpp_97[!tpp_97 %in% dk_97 & !tpp_97 %in% gor_97]
+table_97_mnt$unique <- c(length(dk_97_unique), 
+                         length(gor_97_unique), 
+                         length(tpp_97_unique))
+
+table_97_mnt <- 
+  table_97_mnt %>%
+  mutate(percent = unique/n)
+
+# Number by mountain, plus add number of unique - 95%
+table_95_mnt <- 
+  final_df_clustered %>%
+  group_by(mountain, threshold) %>%
+  summarise(n = n_distinct(cluster)) %>%
+  ungroup() %>%
+  filter(threshold == 0.95)
+
+dk_95_unique <- dk_95[!dk_95 %in% tpp_95 & !dk_95 %in% gor_95]
+gor_95_unique <- gor_95[!gor_95 %in% dk_95 & !gor_95 %in% tpp_95]
+tpp_95_unique <- tpp_95[!tpp_95 %in% dk_95 & !tpp_95 %in% gor_95]
+table_95_mnt$unique <- c(length(dk_95_unique), 
+                         length(gor_95_unique), 
+                         length(tpp_95_unique))
+
+table_95_mnt <- 
+  table_95_mnt %>%
+  mutate(percent = unique/n)
+
+# Taxonomy
+final_df_clustered %>%
+  filter(cluster %in% c(dk_95_unique, gor_95_unique, tpp_95_unique)) %>%
+  select(mountain, elev_grouping_1, cluster, family:species, percent, id) %>% 
+  group_by(mountain, elev_grouping_1) %>%
+  summarise(n_distinct(cluster))
+
+```
+
+Clustering data - Elevation
+```{r}
+threshold <- c(0.97, 0.95)
+mountains <- unique(final_df_clustered$mountain)
+elevations <- unique(final_df_clustered$elev_grouping_1)
+
+unique_elevation <- 
+  final_df_clustered %>%
+  group_by(threshold, mountain, elev_grouping_1) %>%
+  filter(row_number() == 1) %>%
+  select(threshold, mountain, elev_grouping_1) %>%
+  mutate(unique = NA)
+
+for (i in 1:length(unique_elevation$threshold)){
+  
+      other <- 
+        final_df_clustered %>%
+        filter(threshold == unique_elevation$threshold[i] & 
+                 mountain != unique_elevation$mountain[i] & 
+                 elev_grouping_1!= unique_elevation$elev_grouping_1[i]) %>% 
+        distinct(cluster) %>%
+        pull()
+      
+      target <- 
+        final_df_clustered %>%
+        filter(threshold == unique_elevation$threshold[i] & 
+                 mountain == unique_elevation$mountain[i] & 
+                 elev_grouping_1 == unique_elevation$elev_grouping_1[i]) %>% 
+        filter(!cluster %in% other) %>%
+        distinct(cluster) %>%
+        pull()
+      
+      unique_elevation$unique[i] <- length(target)
+}
+
+unique_elevation <- 
+  unique_elevation %>%
+  pivot_wider(names_from = mountain, values_from = unique)
+
+# Number in total
+cluster_elev <- 
+  final_df_clustered %>%
+  group_by(threshold, mountain) %>%
+  mutate(total_cluster = n_distinct(cluster)) %>%
+  ungroup() %>%
+  group_by(threshold, mountain, elev_grouping_1) %>%
+  mutate(elev_cluster = n_distinct(cluster)) %>% 
+  ungroup() %>%
+  mutate(perc = elev_cluster / total_cluster) %>%
+  group_by(threshold, mountain, elev_grouping_1) %>%
+  filter(row_number() == 1) %>%
+  select(threshold, mountain, elev_grouping_1,
+         total_cluster, elev_cluster, perc) 
+
+# Number by mountain, plus add number of unique - 97%
+table_97_mnt <- 
+  final_df_clustered %>%
+  group_by(mountain, threshold) %>%
+  summarise(n = n_distinct(cluster)) %>%
+  ungroup() %>%
+  filter(threshold == 0.97)
+
+dk_97_unique <- dk_97[!dk_97 %in% tpp_97 & !dk_97 %in% gor_97]
+gor_97_unique <- gor_97[!gor_97 %in% dk_97 & !gor_97 %in% tpp_97]
+tpp_97_unique <- tpp_97[!tpp_97 %in% dk_97 & !tpp_97 %in% gor_97]
+table_97_mnt$unique <- c(length(dk_97_unique), 
+                         length(gor_97_unique), 
+                         length(tpp_97_unique))
+
+table_97_mnt <- 
+  table_97_mnt %>%
+  mutate(percent = unique/n)
+
+# Number by mountain, plus add number of unique - 95%
+table_95_mnt <- 
+  final_df_clustered %>%
+  group_by(mountain, threshold) %>%
+  summarise(n = n_distinct(cluster)) %>%
+  ungroup() %>%
+  filter(threshold == 0.95)
+
+dk_95_unique <- dk_95[!dk_95 %in% tpp_95 & !dk_95 %in% gor_95]
+gor_95_unique <- gor_95[!gor_95 %in% dk_95 & !gor_95 %in% tpp_95]
+tpp_95_unique <- tpp_95[!tpp_95 %in% dk_95 & !tpp_95 %in% gor_95]
+table_95_mnt$unique <- c(length(dk_95_unique), 
+                         length(gor_95_unique), 
+                         length(tpp_95_unique))
+
+table_95_mnt <- 
+  table_95_mnt %>%
+  mutate(percent = unique/n)
+
+# Taxonomy
+final_df_clustered %>%
+  filter(cluster %in% c(dk_95_unique, gor_95_unique, tpp_95_unique)) %>%
+  select(mountain, elev_grouping_1, cluster, family:species, percent, id) %>% 
+  group_by(mountain, elev_grouping_1) %>%
+  summarise(n_distinct(cluster))
+
+# Ilomata unique sites - are they at 1000-1500m?
+final_df_clustered %>%
+  filter(cluster %in% gor_95_unique)
+```
+
+```{r otu new heat maps - mountain}
+custom_order <- c("Ilomata: < 500m", "Ilomata: 500 - 1000m", 
+                      "Ilomata: 1000 - 1500m",
+                      "Dako: < 500m", "Dako: 500 - 1000m", "Dako: 1000 - 1500m",
+                      "Dako: 1500 - 2000m", "Dako: >2000m",
+                      "Torompupu: 500 - 1000m", "Torompupu: 1000 - 1500m",
+                      "Torompupu: 1500 - 2000m", "Torompupu: >2000m")
+
+heatmap_info <- 
+  final_df_clustered %>%
+  mutate(mnt_elev = paste0(mountain,": ", elev_grouping_1)) %>%
+  group_by(mnt_elev) %>%
+  filter(row_number() == 1) %>%
+  ungroup() %>%
+  select(mnt_elev, site:elev_grouping_2) %>%
+  arrange(factor(mnt_elev, levels = custom_order))
+
+mountain_palette <- c("#BAAD8D", "#92D3DC", "#93D07D")
+mnt_rep <- c(rep("DK", 5), rep("ILO", 3), rep("TPP", 4))
+color_map <- as.numeric(factor(mnt_rep, levels = mountain_palette))
+
+# 97%
+cluster_97 <- 
+  final_df_clustered %>%
+  filter(threshold == "0.97") %>%
+  mutate(mnt_elev = paste0(mountain,": ", elev_grouping_1)) %>%
+  distinct(mnt_elev, cluster)
+
+mnt_elev <- unique(cluster_97$mnt_elev)
+num <- length(mnt_elev)
+shared_mat <- matrix(0, nrow = num, ncol = num,
+                 dimnames = list(mnt_elev, mnt_elev))
+
+for (i in 1:(num - 1)){
+  for (j in (i + 1):num){
+    x1 <- mnt_elev[i]
+    x2 <- mnt_elev[j]
+    shared <- sum(cluster_97$cluster[cluster_97$mnt_elev == x1] %in% 
+                    cluster_97$cluster[cluster_97$mnt_elev == x2])
+    shared_mat[x1, x2] <- shared
+    shared_mat[x2, x1] <- shared
+  }
+}
+
+shared_97 <- shared_mat[custom_order, custom_order]
+
+get_upper_tri <- 
+  function(cormat){
+    cormat[lower.tri(cormat)]<- NA
+    return(cormat)
+  }
+
+get_lower_tri <- 
+  function(cormat){
+    cormat[upper.tri(cormat)]<- NA
+    return(cormat)
+}
+
+upper_tri <- get_upper_tri(shared_97)
+
+melted_cormat_97 <- 
+  melt(upper_tri, na.rm = TRUE) 
+
+corr_97 <- 
+  ggplot(data = melted_cormat_97, aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "white",
+           lwd = 0.6,
+           linetype = 1) +
+  scale_fill_gradient2(low = "#ff9c00", mid = "#dbb6b9", high = "#8163b3", na.value = "white",
+                      midpoint = 20) +
+  geom_text(aes(label = value), color = "black", size = 4) +
+  theme_transparent() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, 
+    size = 10, hjust = 1), 
+    axis.text.y = element_text(vjust = 1, size = 10, hjust = 1)) +
+  coord_fixed()
+
+# 95%
+cluster_95 <- 
+  final_df_clustered %>%
+  filter(threshold == "0.95") %>%
+  mutate(mnt_elev = paste0(mountain,": ", elev_grouping_1)) %>%
+  distinct(mnt_elev, cluster)
+
+mnt_elev <- unique(cluster_95$mnt_elev)
+num <- length(mnt_elev)
+shared_mat <- matrix(0, nrow = num, ncol = num,
+                 dimnames = list(mnt_elev, mnt_elev))
+
+for (i in 1:(num - 1)){
+  for (j in (i + 1):num){
+    x1 <- mnt_elev[i]
+    x2 <- mnt_elev[j]
+    shared <- sum(cluster_95$cluster[cluster_95$mnt_elev == x1] %in% 
+                    cluster_95$cluster[cluster_95$mnt_elev == x2])
+    shared_mat[x1, x2] <- shared
+    shared_mat[x2, x1] <- shared
+  }
+}
+
+shared_95 <- shared_mat[custom_order, custom_order]
+
+lower_tri <- get_lower_tri(shared_95)
+
+melted_cormat_95 <- 
+  melt(lower_tri, na.rm = TRUE) 
+
+corr_95 <- 
+  ggplot(data = melted_cormat_95, aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "white",
+           lwd = 0.6,
+           linetype = 1) +
+  scale_fill_gradient2(low = "#ff9c00", mid = "#dbb6b9", high = "#8163b3", na.value = "white",
+                      midpoint = 20) +
+  geom_text(aes(label = value), color = "black", size = 4) +
+  theme_transparent() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, 
+    size = 10, hjust = 1), 
+    axis.text.y = element_text(vjust = 1, size = 10, hjust = 1)) +
+  coord_fixed()
+
+
+```
+
+```{r otu old heat maps - mountain}
+custom_order <- c("Ilomata: < 500m", "Ilomata: 500 - 1000m", 
+                      "Ilomata: 1000 - 1500m",
+                      "Dako: < 500m", "Dako: 500 - 1000m", "Dako: 1000 - 1500m",
+                      "Dako: 1500 - 2000m", "Dako: >2000m",
+                      "Torompupu: 500 - 1000m", "Torompupu: 1000 - 1500m",
+                      "Torompupu: 1500 - 2000m", "Torompupu: >2000m")
+
+heatmap_info <- 
+  final_df_clustered %>%
+  mutate(mnt_elev = paste0(mountain,": ", elev_grouping_1)) %>%
+  group_by(mnt_elev) %>%
+  filter(row_number() == 1) %>%
+  ungroup() %>%
+  select(mnt_elev, site:elev_grouping_2) %>%
+  arrange(factor(mnt_elev, levels = custom_order))
+
+
+colors <- circlize::colorRamp2(c(0, 10, 45), c("#ffffff", "#b6dbda", "#8163b3"))
+
+mountain_palette <- c("#BAAD8D", "#92D3DC", "#93D07D")
+mnt_rep <- c(rep("DK", 5), rep("ILO", 3), rep("TPP", 4))
+color_map <- as.numeric(factor(mnt_rep, levels = mountain_palette))
+
+# sOTU
+cluster_sotu <- 
+  final_df_clustered %>%
+  filter(threshold == "sOTU") %>%
+  mutate(mnt_elev = paste0(mountain,": ", elev_grouping_1)) %>%
+  distinct(mnt_elev, cluster)
+
+mnt_elev <- unique(cluster_sotu$mnt_elev)
+num <- length(mnt_elev)
+shared_mat <- matrix(0, nrow = num, ncol = num,
+                 dimnames = list(mnt_elev, mnt_elev))
+
+for (i in 1:(num - 1)){
+  for (j in (i + 1):num){
+    x1 <- mnt_elev[i]
+    x2 <- mnt_elev[j]
+    shared <- sum(cluster_sotu$cluster[cluster_sotu$mnt_elev == x1] %in% 
+                    cluster_sotu$cluster[cluster_sotu$mnt_elev == x2])
+    shared_mat[x1, x2] <- shared
+    shared_mat[x2, x1] <- shared
+  }
+}
+
+shared_reordered <- shared_mat[custom_order, custom_order]
+rownames(shared_reordered) <-  c("< 500m", "500 - 1000m", 
+                      "1000 - 1500m",
+                      " < 500m", "500 - 1000m", "1000 - 1500m",
+                      "1500 - 2000m", ">2000m",
+                      "500 - 1000m", "1000 - 1500m",
+                      "1500 - 2000m", ">2000m")
+colnames(shared_reordered) <-  c("< 500m", "500 - 1000m", 
+                      "1000 - 1500m",
+                      " < 500m", "500 - 1000m", "1000 - 1500m",
+                      "1500 - 2000m", ">2000m",
+                      "500 - 1000m", "1000 - 1500m",
+                      "1500 - 2000m", ">2000m")
+
+
+sotu_heatmap <- 
+  Heatmap(shared_reordered,
+        cluster_rows = F, cluster_columns = F,
+        row_split = heatmap_info$mountain,
+        column_split = heatmap_info$mountain,
+        width = unit(10, "cm"),
+        height = unit(10, "cm"),
+        row_names_gp = gpar(fontsize = 10),
+        column_names_gp = gpar(fontsize = 10),
+        col = colors,
+        cell_fun = function(j, i, x, y, width, height, fill) {
+        grid.text(sprintf("%1.f", shared_reordered[i, j]), x, y, 
+                  gp = gpar(fontsize = 10))},
+        heatmap_legend_param = list(
+          title = "Shared sOTUs"
+        )
+    )
+
+# 97%
+cluster_97 <- 
+  final_df_clustered %>%
+  filter(threshold == "0.97") %>%
+  mutate(mnt_elev = paste0(mountain,": ", elev_grouping_1)) %>%
+  distinct(mnt_elev, cluster)
+
+mnt_elev <- unique(cluster_97$mnt_elev)
+num <- length(mnt_elev)
+shared_mat <- matrix(0, nrow = num, ncol = num,
+                 dimnames = list(mnt_elev, mnt_elev))
+
+for (i in 1:(num - 1)){
+  for (j in (i + 1):num){
+    x1 <- mnt_elev[i]
+    x2 <- mnt_elev[j]
+    shared <- sum(cluster_97$cluster[cluster_97$mnt_elev == x1] %in% 
+                    cluster_97$cluster[cluster_97$mnt_elev == x2])
+    shared_mat[x1, x2] <- shared
+    shared_mat[x2, x1] <- shared
+  }
+}
+
+shared_reordered <- shared_mat[custom_order, custom_order]
+rownames(shared_reordered) <-  
+  c("Ilomata: < 500m", "Ilomata: 500 - 1000m", 
+                      "Ilomata: 1000 - 1500m",
+                      "Dako: < 500m", "Dako: 500 - 1000m", "Dako: 1000 - 1500m",
+                      "Dako: 1500 - 2000m", "Dako: >2000m",
+                      "Torompupu: 500 - 1000m", "Torompupu: 1000 - 1500m",
+                      "Torompupu: 1500 - 2000m", "Torompupu: >2000m")
+colnames(shared_reordered) <-  
+  c("Ilomata: < 500m", "Ilomata: 500 - 1000m", 
+                      "Ilomata: 1000 - 1500m",
+                      "Dako: < 500m", "Dako: 500 - 1000m", "Dako: 1000 - 1500m",
+                      "Dako: 1500 - 2000m", "Dako: >2000m",
+                      "Torompupu: 500 - 1000m", "Torompupu: 1000 - 1500m",
+                      "Torompupu: 1500 - 2000m", "Torompupu: >2000m")
+
+c97_heatmap <- 
+  Heatmap(shared_reordered,
+        cluster_rows = F, cluster_columns = F,
+        row_split = heatmap_info$mountain,
+        column_split = heatmap_info$mountain,
+        width = unit(10, "cm"),
+        height = unit(10, "cm"),
+        row_names_gp = gpar(fontsize = 10),
+        column_names_gp = gpar(fontsize = 10),
+        col = colors,
+        cell_fun = function(j, i, x, y, width, height, fill) {
+        grid.text(sprintf("%1.f", shared_reordered[i, j]), x, y, 
+                  gp = gpar(fontsize = 10))},
+        heatmap_legend_param = list(
+          title = "Shared 97% clusters"
+        )
+    )
+
+get_upper_tri <- 
+  function(cormat){
+    cormat[lower.tri(cormat)]<- NA
+    return(cormat)
+}
+
+upper_tri <- get_upper_tri(shared_reordered)
+
+library(reshape2)
+melted_cormat <- melt(upper_tri, na.rm = TRUE) %>%
+  mutate(value = ifelse(Var1 == Var2, NA, value))
+
+ggplot(data = melted_cormat, aes(Var2, Var1, fill = value)) +
+ geom_tile(color = "black",
+           lwd = 0.1,
+           linetype = 1) +
+ scale_fill_gradient2(low = "#6e126e", mid = "#fccc72", high = "#f76f57", na.value = "white",
+                      midpoint = 20) +
+  theme_minimal() +
+ theme(axis.text.x = element_text(angle = 90, vjust = 1, 
+    size = 10, hjust = 1))+
+ coord_fixed()
+
+
+# 95%
+cluster_95 <- 
+  final_df_clustered %>%
+  filter(threshold == "0.95") %>%
+  mutate(mnt_elev = paste0(mountain,": ", elev_grouping_1)) %>%
+  distinct(mnt_elev, cluster)
+
+mnt_elev <- unique(cluster_95$mnt_elev)
+num <- length(mnt_elev)
+shared_mat <- matrix(0, nrow = num, ncol = num,
+                 dimnames = list(mnt_elev, mnt_elev))
+
+for (i in 1:(num - 1)){
+  for (j in (i + 1):num){
+    x1 <- mnt_elev[i]
+    x2 <- mnt_elev[j]
+    shared <- sum(cluster_95$cluster[cluster_95$mnt_elev == x1] %in% 
+                    cluster_95$cluster[cluster_95$mnt_elev == x2])
+    shared_mat[x1, x2] <- shared
+    shared_mat[x2, x1] <- shared
+  }
+}
+
+shared_reordered <- shared_mat[custom_order, custom_order]
+rownames(shared_reordered) <-  c("< 500m", "500 - 1000m", 
+                      "1000 - 1500m",
+                      " < 500m", "500 - 1000m", "1000 - 1500m",
+                      "1500 - 2000m", ">2000m",
+                      "500 - 1000m", "1000 - 1500m",
+                      "1500 - 2000m", ">2000m")
+colnames(shared_reordered) <-  c("< 500m", "500 - 1000m", 
+                      "1000 - 1500m",
+                      " < 500m", "500 - 1000m", "1000 - 1500m",
+                      "1500 - 2000m", ">2000m",
+                      "500 - 1000m", "1000 - 1500m",
+                      "1500 - 2000m", ">2000m")
+
+c95_heatmap <- 
+  Heatmap(shared_reordered,
+        cluster_rows = F, cluster_columns = F,
+        row_split = heatmap_info$mountain,
+        column_split = heatmap_info$mountain,
+        width = unit(10, "cm"),
+        height = unit(10, "cm"),
+        row_names_gp = gpar(fontsize = 10),
+        column_names_gp = gpar(fontsize = 10),
+        col = colors,
+        cell_fun = function(j, i, x, y, width, height, fill) {
+        grid.text(sprintf("%1.f", shared_reordered[i, j]), x, y, 
+                  gp = gpar(fontsize = 10))},
+        heatmap_legend_param = list(
+          title = "Shared 95% clusters"
+        )
+    )
+
+
+```
+
+```{r clustering dendrograms}
+mat_sotu <- 
+  final_df_clustered %>%
+  filter(threshold == "sOTU") %>%
+  mutate(site_combo = 
+           paste0(mountain, " (", 
+                  elev_grouping_1,")")) %>%
+  group_by(site_combo, cluster) %>%
+  summarise(n = n_distinct(sample)) %>%
+  acast(site_combo ~ cluster, fill = 0)
+
+mat_97 <- 
+  final_df_clustered %>%
+  filter(threshold == "0.97") %>%
+  mutate(site_combo = 
+           paste0(mountain, " (", 
+                  elev_grouping_1,")")) %>%
+  group_by(site_combo, cluster) %>%
+  summarise(n = n_distinct(sample)) %>%
+  acast(site_combo ~ cluster, fill = 0)
+
+mat_95 <- 
+  final_df_clustered %>%
+  filter(threshold == "0.95") %>%
+   mutate(site_combo = 
+           paste0(mountain, " (", 
+                  elev_grouping_1,")")) %>%
+  group_by(site_combo, cluster) %>%
+  summarise(n = n_distinct(sample)) %>%
+  acast(site_combo ~ cluster, fill = 0)
+
+library("ggdendro")
+dend_sotu <- as.dendrogram(hclust(
+  vegdist(mat_sotu, method = "bray"), 
+            method = "average")) # UPGMA
+dend_97 <- hclust(vegdist(mat_97, method = "bray"), 
+            method = "average") # UPGMA
+dend_95 <- hclust(vegdist(mat_95, method = "bray"), 
+            method = "average") # UPGMA
+
+dend_data_sotu <- dendro_data(dend_sotu)
+dend_plot_sotu <- 
+  dend_data_sotu$segments %>%
+  mutate(new_end = ifelse(yend == 0, 0.3, yend)) %>%
+  ggplot() +
+  geom_segment(aes(x = x, y = y, 
+                   xend = xend, yend = new_end), linewidth = 0.3) +
+  coord_flip() +
+  geom_text(data = dend_data_sotu$labels, 
+            aes(x, y = 0.15, 
+                label = label), size = 2) +
+  ylim(0.05, 1) + 
+  theme_dendro()
+  
+dend_data_97 <- dendro_data(dend_97)
+dend_plot_97 <- 
+  dend_data_97$segments %>%
+  mutate(new_end = ifelse(yend == 0, 0.3, yend)) %>%
+  ggplot() +
+  geom_segment(aes(x = x, y = y, 
+                   xend = xend, yend = new_end), linewidth = 0.3) +
+  coord_flip() +
+  geom_text(data = dend_data_97$labels, 
+            aes(x, y = 0.15, 
+                label = label),
+            size = 2) +
+  ylim(0.05, 1) + 
+  theme_dendro()
+
+dend_data_95 <- dendro_data(dend_95)
+dend_plot_95 <- 
+  dend_data_95$segments %>%
+  mutate(new_end = ifelse(yend == 0, 0.3, yend)) %>%
+  ggplot() +
+  geom_segment(aes(x = x, y = y, 
+                   xend = xend, yend = new_end), linewidth = 0.3) +
+  coord_flip() +
+  geom_text(data = dend_data_95$labels, 
+            aes(x, y = 0.15, 
+                label = label),
+            size = 2) +
+  ylim(0.05, 0.9) + 
+  theme_dendro()
+
+dend_arranged <- 
+  ggarrange(dend_plot_sotu, dend_plot_97, dend_plot_95,
+          ncol = 3, nrow = 1)
+```

@@ -1,0 +1,510 @@
+---
+title: "Minibarcode analysis"
+author: "Anna J Holmquist"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir =  "/Users/aholmquist/Documents/GitHub/COI-MiniBarcode/")
+
+```
+
+Libraries
+```{r libraries, echo = F}
+library(tidyverse)
+library(reshape2)
+library(vegan)
+library(ape)
+library(BAT)
+```
+
+Data
+```{r csv}
+# Sequences following DADA2, LULU, decontam, and selection of spider sequences 
+lco_total <- read_csv("data/lco_df.csv")
+
+# Final data set following with all clusters defined and a single sequence 
+# per adult sample, produced by data_preperation code
+final_df_clustered <- read.csv("data/final_df_clustered.csv")
+
+# Site metadata
+site_data <- read_csv("data/site_metadata.csv")
+
+```
+
+Sequencing Results
+```{r}
+# Number of adults, and total spiders
+num_adults <- 
+  lco_total %>%
+  filter(!grepl("juv", sample)) %>%
+  summarise(n_distinct(sample)) %>%
+  pull()
+
+print(paste0("Number of adults: ", num_adults))
+# The value 1,444 was obtained from counting specimens while plating
+print("Number of juveniles: 1444")
+print(paste0("Number of total spiders: ", num_adults+1444))
+
+# Number of reads
+reads <- lco_total %>%
+  summarise(sum(count)) %>%
+  pull()
+print(paste0("Number of reads: ", reads))
+
+# Number of ASVs, OTUs in total
+asv_otu <- lco_total %>%
+  summarise(asv = n_distinct(asv),
+            otu = n_distinct(otu)) 
+
+print(paste0("Number of ASVs: ", pull(asv_otu[1])))
+print(paste0("Number of OTUs: ", pull(asv_otu[2])))
+
+# Number of OTUs per juvenile pool
+juv <-
+  lco_total %>%
+  filter(grepl("juv", sample)) %>%
+  group_by(sample) %>%
+  summarise(otu = n_distinct(otu)) %>%
+  ungroup() %>%
+  summarise(mean = mean(otu),
+             med = median(otu))
+
+print(paste0("A median of ", round(juv[[1]]), " sOTUs and mean of ", 
+      juv[[2]]," sOTUs for juvenile samples"))
+
+# Number of OTUs per adult 
+adults <- 
+  lco_total %>%
+  filter(!grepl("juv", sample)) %>%
+  group_by(sample) %>%
+  summarise(otu = n_distinct(otu)) %>%
+  ungroup() %>%
+  summarise(mean(otu),
+            median(otu))
+
+print(paste0("A median of ", round(adults[[1]]), " sOTUs and mean of ", 
+      adults[[2]]," sOTUs for adult samples"))
+
+# Number of unique OTUs in juveniles 
+juv_otu <-
+  lco_total %>%
+  filter(grepl("juv", sample)) %>%
+  distinct(otu) %>%
+  pull()
+
+adult_otu <-
+  lco_total %>%
+  filter(!grepl("juv", sample)) %>%
+  distinct(otu) %>%
+  pull()
+
+print(paste0("Number of OTUs found only in juvenile pools: ", 
+             length(juv_otu[!juv_otu %in% adult_otu])))
+
+print(paste0("Number of OTUs found only in adult pools: ", 
+             length(adult_otu[!adult_otu %in% juv_otu])))
+```
+
+Alpha diversity - summary of diversity
+```{r}
+final_counts <- 
+  final_df_clustered %>%
+  filter(threshold =="sOTU") %>%
+  summarise(n_distinct(cluster),
+            n_distinct(asv))
+print(paste0("After filtering: ", final_counts[[1]], " sOTUs and ", final_counts[[2]], " ASVs"))
+
+shared <- 
+  final_df_clustered %>%
+  filter(threshold =="sOTU") %>%
+  group_by(cluster) %>%
+  filter(n_distinct(mountain) == 3) %>%
+  ungroup() %>%
+  summarise(n_distinct(cluster))
+print(paste0(shared[[1]], " sOTUs shared between all mountains"))
+
+multi <- 
+  final_df_clustered %>%
+  filter(threshold =="sOTU") %>%
+  group_by(cluster) %>%
+  filter(n_distinct(asv) > 1) %>%
+  ungroup() %>%
+  summarise(n_distinct(cluster))
+
+print(paste0(multi[[1]], " sOTUs with multiple haplotypes"))
+
+```
+
+Test haplotypes across mountains
+```{r statistical test for haplotypes}
+
+# Chi-squared test
+otu_mount_summary <- 
+  final_df_clustered %>%
+  filter(threshold =="sOTU") %>%
+  group_by(cluster) %>%
+  summarise(mountain = n_distinct(mountain),
+            asv_num = n_distinct(asv)) %>%
+  ungroup()
+ 
+contingency_table <- table(otu_mount_summary$asv_num,
+                           otu_mount_summary$mountain)
+chi <- chisq.test(contingency_table)
+
+print(paste0("Significant difference in number of haplotypes by mountain (", round(chi$p.value, digits = 50), ")"))
+
+otu_mount_summary %>%
+  group_by(mountain) %>%
+  summarise(mean(asv_num))
+
+```
+
+Hill numbers
+```{r}
+community_matrix <- 
+  final_df_clustered %>%
+  filter(threshold =="sOTU") %>%
+  group_by(site, cluster) %>%
+  summarise(n = n_distinct(sample)) %>%
+  acast(site ~ cluster, fill = 0)
+
+# Hill numbers
+hill <- 
+  renyi(community_matrix, hill = TRUE, scales = c(0,1,2)) %>%
+  rownames_to_column(var = "site")
+colnames(hill) <- c("site", "q0", "q1", "q2")
+
+# Hill dataframe
+hill_info <- 
+  site_data %>%
+  right_join(hill, by = "site") %>%
+  group_by(site) %>%
+  filter(row_number() == 1) %>%
+  ungroup() 
+
+```
+
+Relationship between Hill numbers and elevation
+```{r Hill by elevation}
+# Diversity by elevation group
+hill_summary <- 
+  hill_info %>%
+  group_by(elev_grouping_1,) %>%
+  summarise(mean_q0 = round(mean(q0), digits = 4),
+            mean_q1 = round(mean(q1), digits = 4),
+            mean_q2 = round(mean(q2),  digits = 4))
+
+# ANOVA
+aov_elev_q0 <- aov(q0 ~ elev_grouping_1, data = hill)
+aov_elev_q1 <- aov(q1 ~ elev_grouping_1, data = hill)
+aov_elev_q2 <- aov(q2 ~ elev_grouping_1, data = hill)
+
+TukeyHSD(aov_elev_q0)
+TukeyHSD(aov_elev_q1)
+TukeyHSD(aov_elev_q2)
+
+# Linear models across elevation
+lmq0 <- lm(q0 ~ elev, data = hill_info) # Adj R2 = 0.076, p = 0.114
+lmq1 <- lm(q1 ~ elev, data = hill_info) # Adj R2 = 0.208, p = 0.017
+lmq2 <- lm(q2 ~ elev, data = hill_info) # Adj R2 = 0.30, p = 0.004
+
+```
+
+Relationship between Hill numbers and mountain
+```{r Hill by mountain}
+# ANOVA - mountains
+aov_q0 <- aov(q0 ~ mountain, data = hill_info)
+summary(aov_q0)
+
+aov_q1 <- aov(q1 ~ mountain, data = hill_info)
+summary(aov_q1)
+
+aov_q2 <- aov(q2 ~ mountain, data = hill_info)
+summary(aov_q2)
+
+TukeyHSD(aov_q0)
+TukeyHSD(aov_q1)
+TukeyHSD(aov_q2)
+
+```
+
+Calculate phylogenetic beta diversity
+```{r phylogenetic beta diversity}
+# ASV community matrix
+asv_community_matrix <- 
+  final_df_clustered %>%
+  filter(threshold =="sOTU") %>%
+  group_by(site, asv) %>%
+  summarise(n = n_distinct(sample)) %>%
+  acast(site ~ asv, fill = 0)
+
+# Tree figure
+phylo_df <- 
+  final_df_clustered %>%
+  group_by(asv) %>%
+  filter(row_number() == 1) %>%
+  ungroup() %>%
+  select(asv, family, id)
+
+tree <- read.tree("data/phylogeny.treefile")
+tree <- drop.tip(tree, "asv_lco_1")
+
+beta <- beta(comm = asv_community_matrix, tree = tree, raref = 20)
+beta_mat <- as.matrix(beta$Btotal.mean)
+rownames(beta_mat) <- rownames(asv_community_matrix)
+colnames(beta_mat) <- rownames(asv_community_matrix)
+beta_dist <- as.dist(beta_mat)
+
+set.seed(999)
+nmds <- metaMDS(beta_dist, k = 3, tidy = T)
+nmds_df <- as_tibble(nmds$points)
+nmds_df$site <- rownames(nmds$points) 
+
+# PERMANOVA
+beta_perm <- adonis2(beta_dist ~ mountain + elev + mountain*elev, data = site_data)  
+
+# PERMDISP
+beta_disp_mountain <- betadisper(beta_dist, site_data$mountain) 
+
+beta_disp_elevation <- betadisper(beta_dist, site_data$elev_grouping_1)
+
+anova(beta_disp_mountain)
+anova(beta_disp_elevation)
+```
+
+Clustering data by mountains
+```{r}
+
+# All shared
+shared_all <- 
+  final_df_clustered %>%
+  group_by(threshold, cluster) %>%
+  summarize(mnt_num = n_distinct(mountain)) %>%
+  ungroup() %>%
+  group_by(threshold, mnt_num) %>%
+  summarise(shared = n_distinct(cluster)) %>%
+  pivot_wider(names_from = mnt_num, values_from = shared)
+
+summary <- 
+  final_df_clustered %>%
+  group_by(threshold) %>%
+  summarise(total = n_distinct(cluster)) %>%
+  right_join(shared_all, by = "threshold")
+
+# Number by mountain, plus add number of unique - sOTUs
+table_sotu_mnt <- 
+  final_df_clustered %>%
+  group_by(mountain, threshold) %>%
+  summarise(n = n_distinct(cluster)) %>%
+  ungroup() %>%
+  filter(threshold == "sOTU")
+
+dk_sotu_unique <- dk_sotu[!dk_sotu %in% tpp_sotu & !dk_sotu %in% gor_sotu]
+gor_sotu_unique <- gor_sotu[!gor_sotu %in% dk_sotu & !gor_sotu %in% tpp_sotu]
+tpp_sotu_unique <- tpp_sotu[!tpp_sotu %in% dk_sotu & !tpp_sotu %in% gor_sotu]
+table_sotu_mnt$unique <- c(length(dk_sotu_unique), 
+                         length(gor_sotu_unique), 
+                         length(tpp_sotu_unique))
+
+table_sotu_mnt <- 
+  table_sotu_mnt %>%
+  mutate(percent = unique/n)
+
+# Number by mountain, plus add number of unique - 97%
+table_97_mnt <- 
+  final_df_clustered %>%
+  group_by(mountain, threshold) %>%
+  summarise(n = n_distinct(cluster)) %>%
+  ungroup() %>%
+  filter(threshold == 0.97)
+
+dk_97_unique <- dk_97[!dk_97 %in% tpp_97 & !dk_97 %in% gor_97]
+gor_97_unique <- gor_97[!gor_97 %in% dk_97 & !gor_97 %in% tpp_97]
+tpp_97_unique <- tpp_97[!tpp_97 %in% dk_97 & !tpp_97 %in% gor_97]
+table_97_mnt$unique <- c(length(dk_97_unique), 
+                         length(gor_97_unique), 
+                         length(tpp_97_unique))
+
+table_97_mnt <- 
+  table_97_mnt %>%
+  mutate(percent = unique/n)
+
+# Number by mountain, plus add number of unique - 95%
+table_95_mnt <- 
+  final_df_clustered %>%
+  group_by(mountain, threshold) %>%
+  summarise(n = n_distinct(cluster)) %>%
+  ungroup() %>%
+  filter(threshold == 0.95)
+
+dk_95_unique <- dk_95[!dk_95 %in% tpp_95 & !dk_95 %in% gor_95]
+gor_95_unique <- gor_95[!gor_95 %in% dk_95 & !gor_95 %in% tpp_95]
+tpp_95_unique <- tpp_95[!tpp_95 %in% dk_95 & !tpp_95 %in% gor_95]
+table_95_mnt$unique <- c(length(dk_95_unique), 
+                         length(gor_95_unique), 
+                         length(tpp_95_unique))
+
+table_95_mnt <- 
+  table_95_mnt %>%
+  mutate(percent = unique/n)
+
+```
+
+Clustering data by elevation 
+```{r}
+threshold <- c(0.97, 0.95)
+mountains <- unique(final_df_clustered$mountain)
+elevations <- unique(final_df_clustered$elev_grouping_1)
+
+unique_elevation <- 
+  final_df_clustered %>%
+  group_by(threshold, mountain, elev_grouping_1) %>%
+  filter(row_number() == 1) %>%
+  select(threshold, mountain, elev_grouping_1) %>%
+  mutate(unique = NA)
+
+for (i in 1:length(unique_elevation$threshold)){
+  
+      other <- 
+        final_df_clustered %>%
+        filter(threshold == unique_elevation$threshold[i] & 
+                 mountain != unique_elevation$mountain[i] & 
+                 elev_grouping_1!= unique_elevation$elev_grouping_1[i]) %>% 
+        distinct(cluster) %>%
+        pull()
+      
+      target <- 
+        final_df_clustered %>%
+        filter(threshold == unique_elevation$threshold[i] & 
+                 mountain == unique_elevation$mountain[i] & 
+                 elev_grouping_1 == unique_elevation$elev_grouping_1[i]) %>% 
+        filter(!cluster %in% other) %>%
+        distinct(cluster) %>%
+        pull()
+      
+      unique_elevation$unique[i] <- length(target)
+}
+
+unique_elevation <- 
+  unique_elevation %>%
+  pivot_wider(names_from = mountain, values_from = unique)
+
+# Number in total
+cluster_elev <- 
+  final_df_clustered %>%
+  group_by(threshold, mountain) %>%
+  mutate(total_cluster = n_distinct(cluster)) %>%
+  ungroup() %>%
+  group_by(threshold, mountain, elev_grouping_1) %>%
+  mutate(elev_cluster = n_distinct(cluster)) %>% 
+  ungroup() %>%
+  mutate(perc = elev_cluster / total_cluster) %>%
+  group_by(threshold, mountain, elev_grouping_1) %>%
+  filter(row_number() == 1) %>%
+  select(threshold, mountain, elev_grouping_1,
+         total_cluster, elev_cluster, perc) 
+
+```
+
+Matrices of shared clusters by elevation
+```{r}
+custom_order <- c("Ilomata: < 500m", "Ilomata: 500 - 1000m", 
+                      "Ilomata: 1000 - 1500m",
+                      "Dako: < 500m", "Dako: 500 - 1000m", "Dako: 1000 - 1500m",
+                      "Dako: 1500 - 2000m", "Dako: >2000m",
+                      "Torompupu: 500 - 1000m", "Torompupu: 1000 - 1500m",
+                      "Torompupu: 1500 - 2000m", "Torompupu: >2000m")
+
+# 97%
+cluster_97 <- 
+  final_df_clustered %>%
+  filter(threshold == "0.97") %>%
+  mutate(mnt_elev = paste0(mountain,": ", elev_grouping_1)) %>%
+  distinct(mnt_elev, cluster)
+
+mnt_elev <- unique(cluster_97$mnt_elev)
+num <- length(mnt_elev)
+shared_mat <- matrix(0, nrow = num, ncol = num,
+                 dimnames = list(mnt_elev, mnt_elev))
+
+for (i in 1:(num - 1)){
+  for (j in (i + 1):num){
+    x1 <- mnt_elev[i]
+    x2 <- mnt_elev[j]
+    shared <- sum(cluster_97$cluster[cluster_97$mnt_elev == x1] %in% 
+                    cluster_97$cluster[cluster_97$mnt_elev == x2])
+    shared_mat[x1, x2] <- shared
+    shared_mat[x2, x1] <- shared
+  }
+}
+
+shared_97 <- shared_mat[custom_order, custom_order]
+
+# 95%
+cluster_95 <- 
+  final_df_clustered %>%
+  filter(threshold == "0.95") %>%
+  mutate(mnt_elev = paste0(mountain,": ", elev_grouping_1)) %>%
+  distinct(mnt_elev, cluster)
+
+mnt_elev <- unique(cluster_95$mnt_elev)
+num <- length(mnt_elev)
+shared_mat <- matrix(0, nrow = num, ncol = num,
+                 dimnames = list(mnt_elev, mnt_elev))
+
+for (i in 1:(num - 1)){
+  for (j in (i + 1):num){
+    x1 <- mnt_elev[i]
+    x2 <- mnt_elev[j]
+    shared <- sum(cluster_95$cluster[cluster_95$mnt_elev == x1] %in% 
+                    cluster_95$cluster[cluster_95$mnt_elev == x2])
+    shared_mat[x1, x2] <- shared
+    shared_mat[x2, x1] <- shared
+  }
+}
+
+shared_95 <- shared_mat[custom_order, custom_order]
+
+```
+
+Biodiversity summary
+```{r summary}
+# Create data set for just sOTUs
+df_sotu <- 
+  final_df_clustered %>%
+  filter(threshold == "sOTU")
+
+above_95 <- df_sotu %>%
+  group_by(cluster) %>%
+  filter(row_number() == 1) %>%
+  ungroup() %>%
+  filter(percent >= 95) %>%
+  summarise(n_distinct(cluster))
+
+print(paste0("Number of sOTUs with matches above 95%: ", 
+             above_95[[1]]))
+
+above_99 <- df_sotu %>%
+  filter(percent > 99) %>%
+  summarise(n_distinct(cluster))
+print(paste0("Number of sOTUs with matches above 99%: ", 
+             above_99[[1]]))
+
+sp <- df_sotu %>%
+  filter(percent > 99) %>%
+  distinct(genus, species) %>% 
+  mutate(sp = paste0(genus, " ", species)) %>%
+  pull(sp)
+print(c("Species:", sp))
+
+families <- df_sotu %>%
+  filter(!is.na(id)) %>%
+  summarise(n_distinct(id))
+
+print(paste0("Number of families: ", 
+             families[[1]]))
+```

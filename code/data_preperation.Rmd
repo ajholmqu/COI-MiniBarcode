@@ -1,0 +1,306 @@
+---
+title: "data_preperation"
+author: "Holmquist"
+date: "2024-02-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir =  "/Users/aholmquist/Documents/GitHub/COI-MiniBarcode/")
+
+```
+
+CSVs needed
+```{r data}
+# All sequences following filtering
+lco_total <- read.csv("data/lco_df.csv")
+```
+
+Determining filtering thresholds and removing multiple OTUs found in adult samples
+````{r}
+# Supplementary figure: number of OTUs per individual
+otu_hist <- 
+  lco_total %>%
+  filter(!grepl("juv", sample)) %>%
+  group_by(sample) %>%
+  summarise(n = n_distinct(otu)) %>%
+  ggplot(aes(n)) +
+  geom_histogram() +
+  xlab("Number of OTUs") +
+  ylab("Number of samples") +
+  theme_minimal()
+ggsave("figures/supp/supp_numberofotus.png", height = 3, width = 5, units = "in")
+# Creating dataset with identified adult specimens
+morpho_adults_all <-
+  lco_total %>%
+  # Remove juveniles
+  filter(!grepl("juv", sample)) %>%
+  # Join the morphological data with the OTU identity data
+  left_join(morpho, by = c("morpho_label" = "sample")) %>%
+  left_join(otu_id, by = c("otu", "otu_seq")) %>%
+  # Remove any that were not identified
+  filter(!is.na(morpho_family) & !is.na(id)) %>%
+  # Create column for identity matches
+  mutate(match = ifelse(morpho_family == id, "Match", "Mismatch")) 
+
+# Number of mismatches when selecting max count
+morpho_adults_all %>%
+  group_by(sample) %>%
+  slice_max(otu_count) %>%
+  ungroup() %>%
+  group_by(match) %>%
+  summarise(n_distinct(sample)) %>%
+  ungroup()
+
+# Match/Mismatch colors
+p_fill <- c("#bfcbdb","#b04238")
+
+# Assess the importance of number of reads
+p_reads_hist <- 
+  morpho_adults_all %>%
+  ggplot(aes(x = otu_count)) +
+  geom_histogram(aes(fill = as.factor(match)), 
+                 color = "black", position = "dodge") +
+  labs(x = "sOTU reads", y = "Count", fill = "Taxonomic Match") +
+  scale_fill_manual(values = p_fill) +
+  theme_minimal()
+
+p_reads_box <- 
+  morpho_adults_all %>%
+  ggplot(aes(x = as.factor(match), y = log(otu_count))) +
+  geom_boxplot(aes(fill = as.factor(match))) +
+  geom_jitter(alpha = 0.1) +
+  labs(x = "Taxonomic Match", y = "Log-transformed sOTU count", fill = "Taxonomic Match") + 
+  scale_fill_manual(values = p_fill) +
+  theme_minimal()
+
+p_reads <- ggarrange(p_reads_hist, p_reads_box, common.legend = TRUE)
+
+t.test(morpho_adults_all$otu_count[morpho_adults_all$match == "Match"], 
+       morpho_adults_all$otu_count[morpho_adults_all$match == "Mismatch"])
+
+morpho_adults_all %>%
+  group_by(match) %>%
+  summarise(iqr = IQR(otu_count),
+            median = median(otu_count),
+            mean = mean(otu_count),
+            min = min(otu_count),
+            lower = quantile(otu_count, 0.25),
+            upper = quantile(otu_count, 0.75))
+
+# Assess the importance of OTU proportion
+otu_proportion <- 
+  morpho_adults_all %>%
+  mutate(prop = otu_count / otu_size) 
+
+p_otuprop_hist <- 
+  otu_proportion %>%
+  ggplot(aes(x = prop)) +
+  geom_histogram(aes(fill = as.factor(match)), 
+                 color = "black", position = "dodge") +
+  labs(x = "sOTU reads", y = "Count", fill = "Taxonomic Match") +
+  scale_fill_manual(values = p_fill) +
+  theme_minimal()
+
+p_otuprop_box <- 
+  otu_proportion %>%
+  ggplot(aes(x = match, y = log(prop))) +
+  geom_boxplot(aes(fill = as.factor(match))) +
+  geom_jitter(alpha = 0.1) +
+  labs(x = "Taxonomic Match", y = "Log-transformed proportion", fill = "Taxonomic Match") +
+  scale_fill_manual(values = p_fill) +
+  theme_minimal()
+
+p_otuprop <- ggarrange(p_otuprop_hist, p_otuprop_box, common.legend = TRUE)
+t.test(otu_proportion$prop[otu_proportion$match == "Match"], 
+       otu_proportion$prop[otu_proportion$match == "Mismatch"])
+
+otu_proportion %>%
+  group_by(match) %>%
+  summarise(iqr = IQR(prop),
+            median = median(prop),
+            mean = mean(prop),
+            min = min(prop),
+            lower = quantile(prop, 0.25),
+            upper = quantile(prop, 0.75))
+
+# Apply filters to total dataset and assess changes in multiple OTUs
+lco_total %>%
+  filter(otu_count / otu_size > 0.005 &
+           otu_count > 25) %>%
+  filter(!grepl("juv", sample)) %>%
+  group_by(sample) %>%
+  summarise(n = n_distinct(otu)) %>%
+  ungroup() %>%
+  summarise(mean(n),
+            median(n)) 
+
+# Create final data frame based on above results
+final_adults <- 
+  lco_total %>%
+  filter(otu_count / otu_size > 0.005 &
+           otu_count > 25) %>%
+  filter(!grepl("juv", sample)) %>%
+  group_by(sample) %>%
+  slice(which.max(count)) %>%
+  ungroup()
+n_distinct(final_adults$sample)
+
+final_df <- 
+  lco_total %>%
+  filter(grepl("juv", sample)) %>%
+  rbind(final_adults) %>%
+  left_join(otu_id, by = c("otu", "otu_seq")) 
+
+```
+
+Add site information
+```{r}
+for(i in 1:length(final_df$sample)){
+  for(site in site_data$site){
+    if(grepl(site, final_df$sample[i])){
+      final_df$site[i] <- site
+      break
+    }
+  }
+}
+
+final_df <- final_df %>%
+  left_join(site_data, by = "site")
+
+# Write CSV for future analysis
+write.csv(final_df,
+          "/Users/aholmquist/Documents/GitHub/sulawesi/spiders/data/df_final.csv",
+          row.names = F)
+
+```
+
+Create kmer OTUs
+```{r}
+library(Biostrings)
+library(ape)
+library(kmer)
+
+# Make sequences into DNAbin
+seqs <- 
+  final_df %>%
+  select(asv, seq) %>%
+  group_by(asv, seq) %>%
+  filter(row_number() == 1) %>%
+  ungroup() 
+
+seqs_fasta <- DNAStringSet(seqs$seq)
+write.FASTA(seqs_fasta, "spider_sotus.fast")
+seqs_fasta <- as.DNAbin(seqs_fasta)
+names(seqs_fasta) <- seqs$asv
+
+# Create different clusters
+set.seed(345)
+cluster_97 <- otu(seqs_fasta, method = "centroid", 
+                  threshold = 0.97, k = 3) 
+cluster_95 <- otu(seqs_fasta, method = "centroid", 
+                  threshold = 0.95, k = 3) 
+
+# Numbers
+length(unique(final_df$asv))
+length(unique(final_df$otu)) # 508
+length(unique(cluster_97)) # 332
+length(unique(cluster_95)) # 145
+
+# Add to data frame
+df_97 <- 
+  as.data.frame(cluster_97) %>%
+  rownames_to_column(var = "asv") %>%
+  mutate(centroid = ifelse(grepl("\\*", asv), TRUE, FALSE),
+         cluster = paste0("cluster97_", cluster_97),
+         threshold = 0.97,
+         asv = sub("\\*", "", asv)) %>%
+  group_by(cluster) %>%
+  mutate(parent = asv[centroid == TRUE]) %>%
+  ungroup() %>%
+  select(-cluster_97)
+
+df_95 <- 
+  as.data.frame(cluster_95) %>%
+  rownames_to_column(var = "asv") %>%
+  mutate(centroid = ifelse(grepl("\\*", asv), TRUE, FALSE),
+         cluster = paste0("cluster95_", cluster_95),
+         threshold = 0.95,
+         asv = sub("\\*", "", asv)) %>%
+  group_by(cluster) %>%
+  mutate(parent = asv[centroid == TRUE]) %>%
+  ungroup() %>%
+  select(-cluster_95)
+
+# Create total dataframe
+asv <- 
+  final_df %>%
+  group_by(asv, seq) %>%
+  filter(row_number() == 1) %>%
+  select(asv, seq)
+
+df_clusters <- 
+  rbind(df_97, df_95) %>%
+  left_join(asv, by = c("parent" = "asv")) %>%
+  select(-parent, -centroid) %>%
+  rename(cluster_seq = seq)
+
+otu <- 
+  final_df %>%
+  select(asv, otu, otu_seq) %>%
+  mutate(threshold = "sOTU") %>%
+  rename(cluster = otu,
+         cluster_seq = otu_seq) %>%
+  group_by(asv) %>%
+  filter(row_number() == 1) %>%
+  ungroup()
+
+df_clusters <- rbind(df_clusters, otu)
+
+final_df_clustered <-
+  final_df %>%
+  select(-c(otu, otu_count, otu_size, otu_seq)) %>%
+  left_join(df_clusters, by = "asv") %>%
+  # Based on phylogeny, and the enormity of this asv, seems incorrect
+  filter(asv != "asv_lco_1")
+
+# How big was asv_lco_1
+final_df %>%
+  filter(asv == "asv_lco_1") 
+  summarise(n_distinct(sample))
+
+final_df_sotu <- final_df_clustered %>%
+  filter(threshold == "sOTU") 
+
+write.csv(final_df_clustered, "final_df_clustered.csv", row.names = F)
+
+# Create table showing 
+
+clustering_tab <- 
+  final_df_clustered %>% 
+  group_by(mountain, threshold) %>% 
+  summarise(n = n_distinct(cluster)) %>%
+  ungroup() %>%
+  pivot_wider(names_from = threshold, values_from = n)
+
+clustering_tab <- 
+  final_df_clustered %>% 
+  group_by(threshold) %>% 
+  summarise(n = n_distinct(cluster)) %>%
+  ungroup() %>%
+  mutate(mountain = "All") %>%
+  pivot_wider(names_from = threshold, values_from = n) %>%
+  rbind(clustering_tab) %>%
+  arrange(desc(mountain))
+
+otu_num_table <- 
+  kable(clustering_tab, format = "html", 
+        caption = "Number of clusters",
+        col.names = c("Mountain", "95%", "97%", "sOTU")) %>%
+  kable_classic(
+                html_font = "Arial") %>%
+  column_spec(1, bold = TRUE)
+save_kable(otu_num_table, file = "otu_nums.pdf")
+
+```
