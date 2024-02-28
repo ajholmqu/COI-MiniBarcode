@@ -193,15 +193,15 @@ Relationship between Hill numbers and elevation
 # Diversity by elevation group
 hill_summary <- 
   hill_info %>%
-  group_by(elev_grouping_1,) %>%
+  group_by(elev_grouping_1) %>%
   summarise(mean_q0 = round(mean(q0), digits = 4),
             mean_q1 = round(mean(q1), digits = 4),
             mean_q2 = round(mean(q2),  digits = 4))
 
 # ANOVA
-aov_elev_q0 <- aov(q0 ~ elev_grouping_1, data = hill)
-aov_elev_q1 <- aov(q1 ~ elev_grouping_1, data = hill)
-aov_elev_q2 <- aov(q2 ~ elev_grouping_1, data = hill)
+aov_elev_q0 <- aov(q0 ~ elev_grouping_1, data = hill_info)
+aov_elev_q1 <- aov(q1 ~ elev_grouping_1, data = hill_info)
+aov_elev_q2 <- aov(q2 ~ elev_grouping_1, data = hill_info)
 
 TukeyHSD(aov_elev_q0)
 TukeyHSD(aov_elev_q1)
@@ -278,6 +278,27 @@ anova(beta_disp_elevation)
 
 Clustering data by mountains
 ```{r}
+# List for each mountain
+dk_sotu <- final_df_clustered$cluster[final_df_clustered$mountain_letter == "DK"
+                                      & final_df_clustered$threshold == "sOTU"]
+dk_97 <- final_df_clustered$cluster[final_df_clustered$mountain_letter == "DK"
+                                      & final_df_clustered$threshold == "0.97"]
+dk_95 <- final_df_clustered$cluster[final_df_clustered$mountain_letter == "DK"
+                                      & final_df_clustered$threshold == "0.95"]
+
+tpp_sotu <- final_df_clustered$cluster[final_df_clustered$mountain_letter == "TPP"
+                                      & final_df_clustered$threshold == "sOTU"]
+tpp_97 <- final_df_clustered$cluster[final_df_clustered$mountain_letter == "TPP"
+                                      & final_df_clustered$threshold == "0.97"]
+tpp_95 <- final_df_clustered$cluster[final_df_clustered$mountain_letter == "TPP"
+                                      & final_df_clustered$threshold == "0.95"]
+
+gor_sotu <- final_df_clustered$cluster[final_df_clustered$mountain_letter == "GOR"
+                                      & final_df_clustered$threshold == "sOTU"]
+gor_97 <- final_df_clustered$cluster[final_df_clustered$mountain_letter == "GOR"
+                                      & final_df_clustered$threshold == "0.97"]
+gor_95 <- final_df_clustered$cluster[final_df_clustered$mountain_letter == "GOR"
+                                      & final_df_clustered$threshold == "0.95"]
 
 # All shared
 shared_all <- 
