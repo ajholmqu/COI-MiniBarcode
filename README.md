@@ -1,2 +1,2 @@
 # COI-MiniBarcode
-Using a COI mini-barcode to quantify patterns of spider diversity in the biodiversity hotspot of Wallacea
+Code and data related to sumitted manuscript "High-throughput DNA barcoding provides insight into the factors shaping spider diversity in the biodiversity hotspot of Wallacea"
